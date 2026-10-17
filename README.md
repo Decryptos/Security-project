@@ -44,6 +44,59 @@ def normalize_url(url: str) -> str:
     # clear query/fragment because they are not part of the endpoint identity here
     return urlunsplit((scheme, netloc, path, "", ""))
 
+def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
+         delay: float = 1., timeout: float = 6., openapi: Path | None = None) -> dict:
+    normalized_urls = []
+    seen = set()
+    for url in urls:
+        validated = validate_url(url)
+        canon = normalize_url(validated)
+        if canon not in seen:
+            seen.add(canon)
+            normalized_urls.append(canon)
+
+    normalized_private = {normalize_url(u) for u in private_urls}
+    if not normalized_private.issubset(set(normalized_urls)):
+        raise ValueError("Every --private-url must be included in --url")
+
+    if len(normalized_urls) > 12 or len(normalized_urls) != len(set(normalized_urls)):
+        raise ValueError("Use at most 12 different, explicitly listed URLs per run")
+
+    opener = build_opener(
+        NoRedirect(),
+        HTTPHandler(),
+        HTTPSHandler(context=ssl.create_default_context()),
+        ProxyHandler({})
+    )
+
+    findings, observations, errors = [], [], []
+    sent = 0
+
+    for url in normalized_urls:
+        for method, origin in [("GET" if url in normalized_private else "HEAD", None)] + ([("GET", MARKER_ORIGIN)] if cors else []):
+            if sent:
+                time.sleep(delay)
+            sent += 1
+
+            try:
+                status, headers = send(opener, url, method, origin, timeout)
+            except (HTTPError, URLError, TimeoutError, ssl.SSLError, OSError, ValueError, http.client.HTTPException) as exc:
+                errors.append({"url": url, "method": method, "error_type": type(exc).__name__})
+                continue
+
+            observations.append({
+                "url": url,
+                "method": method,
+                "status": status,
+                "cors_probe": bool(origin),
+                "redirect_not_followed": 300 <= status < 400,
+            })
+
+            if origin:
+                findings.extend(cors_checks(url, status, headers))
+            else:
+                findings.extend(observe(url, status, headers, url in normalized_private))
+
 
 VERSION = "1.1"
 MARKER_ORIGIN = "https://audit-origin.invalid"  # Not an attacker-controlled server.
