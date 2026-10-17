@@ -1,126 +1,95 @@
 # Security-project — Decrypto
 
-Decrypto is an assumption-driven static and live-audit toolkit for finding unintended
-cryptography implementation bugs and other crypto-related anti-patterns in code.
+Decrypto is a Python-first, assumption-driven crypto review toolkit.
 
-This project is Python-first. The goal is to perform repo-wide crypto lead detection
-with Python tooling and Python-based sample implementations, while keeping the project
-focused on responsible review rather than confirmed exploitation.
+It is designed to find likely cryptography implementation bugs and insecure patterns in codebases, while clearly labeling every result as an unconfirmed lead rather than a confirmed exploit.
 
-This project is a lead-generation tool for security reviewers and SecOps teams. It
-is NOT a confirmed vulnerability scanner or a cryptographic validator. Findings
-are hypothesis-driven and require owner validation before reporting or remediation.
+This project is intended for authorized security review, internal SecOps triage, and responsible disclosure workflows. It is not a cryptographic validator and it is not a proof engine.
 
-Key goals
+Project goals
+- Scan source repositories for likely crypto implementation mistakes.
+- Map findings to public CWE families for triage.
+- Keep the project Python-native and easy to run from the command line.
+- Keep outputs redacted and respectful of privacy and authorization boundaries.
 
-- Detect likely crypto implementation mistakes (hardcoded keys, weak hashes,
-  insecure RNG, TLS bypasses, misused cipher APIs) across a repository snapshot
-  and optionally as read-only live HTTP checks for authorized targets.
-- Produce concise, redacted, reproducible leads that a SecOps engineer or
-  security reviewer can triage and validate.
-- Keep the project Python-native, using Python implementations for secure crypto
-  examples and relying on Python tooling for static scanning.
-- Avoid storing secret values, response bodies, cookie names/values, redirect
-  destinations, or session tokens in outputs.
+Included files
+- decrypto_assumption_scan.py: live HTTP/OpenAPI auditor for explicitly authorized targets.
+- decrypto_crypto_checks.py: static repo scan for crypto misuses and anti-patterns.
+- secure_crypto_examples.py: Python examples for secure randomness, PBKDF2, HMAC, and constant-time comparison.
+- tests/test_crypto_checks.py: light regression tests for the static scanner.
+- .github/workflows/ci.yml: Python CI workflow.
 
-What it includes
+CWE-aware model
 
-- decrypto_assumption_scan.py — the main, read-only assumption-driven HTTP and
-  OpenAPI auditor. Designed to run against explicitly authorized HTTP(S) URLs and
-  local OpenAPI JSON files only.
-- decrypto_crypto_checks.py — repo-wide static scanner for crypto implementation
-  anti-patterns in Python source files (and conservative text-based patterns for other source types).
-- secure_crypto_examples.py — Python-native secure crypto helper examples using
-  `secrets` and `hashlib` for random byte generation, password-derived key material,
-  and HMAC verification.
-- tests/ — unit tests for the scanner and the static crypto checks.
-- .github/workflows/ci.yml — CI workflow that runs the Python unit tests.
+Findings are associated with public CWE categories so that they can be triaged consistently. The model is intentionally assumption-driven:
+- a finding is a lead
+- a CWE mapping is a likely category, not proof of exploitability
+- a CVE association is optional context only, not a vulnerability confirmation
 
-Supported checks (snapshot static analysis)
+The primary static rule families are mapped to public CWE entries, including:
+- Hard-coded keys / embedded private keys -> CWE-321
+- Weak crypto algorithms -> CWE-327
+- Insecure randomness -> CWE-330
+- TLS validation bypass -> CWE-295
+- Password hashing with insufficient work factor -> CWE-916
 
-The static crypto checks are heuristics that report leads for manual review. They
-include but are not limited to:
+Static crypto checks
 
-- Hardcoded-looking long hex/base64 strings and embedded PEM private keys
-- Use of weak or deprecated hashes (md5, sha1, md4)
-- Weak ciphers or insecure modes (ECB, RC4, DES, 3DES)
-- Use of non-cryptographic RNGs or explicit PRNG seeding (random.random(), random.seed())
-- TLS verification bypass (verify=False, _create_unverified_context)
-- PBKDF2 usage (flagged for manual verification of iterations and salt)
-- Potential "rolling-your-own" use of low-level cipher APIs
+The static scanner checks for common implementation issues, including:
+- hardcoded secret-like literals and PEM private keys
+- weak hashes such as MD5, SHA-1, and MD4
+- insecure ciphers or cipher modes such as ECB, DES, RC4, and 3DES
+- insecure randomness such as random.random() and random.seed()
+- TLS validation bypasses such as verify=False or _create_unverified_context
+- PBKDF2 usage that should be reviewed for low iteration counts
+- low-level cipher API usage that may indicate unsafe custom crypto
 
-Python secure crypto examples
+Live HTTP/OpenAPI checks
 
-The repo now includes a Python-safe crypto reference module that demonstrates
-trusted patterns instead of insecure JavaScript equivalents:
+The live scanner is read-only and requires explicit authorization. It can check:
+- missing HSTS on HTTPS endpoints
+- session-like cookies missing Secure, HttpOnly, or SameSite flags
+- CORS origin reflection and cache policy contradictions
+- private endpoint assumptions
+- offline OpenAPI contract issues such as API keys in URL query strings and mutating operations without security declarations
 
-- `secrets.token_bytes()` for cryptographic randomness
-- `hashlib.pbkdf2_hmac()` for password-derived keys with explicit iteration counts
-- `hmac.compare_digest()` for constant-time comparison
-- Explicit hashing/HMAC examples that avoid unsafe defaults
+Safety and privacy
 
-Live HTTP/OpenAPI checks (assumption-driven)
+- Live checks require --authorized and explicit target URLs.
+- Redirects are never followed.
+- Response bodies, cookies, tokens, redirect destinations, and other sensitive raw values are not stored.
+- Governing rule: no exploit payloads, no credential reuse, no cross-user validation.
 
-- HSTS missing on HTTPS endpoints
-- Session-like cookies missing Secure/HttpOnly/SameSite attributes
-- CORS credential reflection + caching leads
-- Private-endpoint assumptions (gated by observable auth signals such as WWW-Authenticate or session-like Set-Cookie)
-- Offline OpenAPI contract inspection (API key-in-URL, mutating operations without documented security requirements)
+Usage
 
-Important safety and privacy constraints
+Run the static crypto check against the current repository:
 
-- Live HTTP checks are disabled unless you pass `--authorized` and provide
-  explicit --url values. Do not run the live scanner against assets you do not
-  have permission to test.
-- The tool never follows redirects and does not send exploit payloads.
-- The tool does not store response bodies, cookie values, or other secrets. All
-  evidence in reports is redacted or limited to non-sensitive metadata.
+python3 -c "from decrypto_crypto_checks import scan_repo_for_crypto_issues; import json, pathlib; print(json.dumps(scan_repo_for_crypto_issues(pathlib.Path('.')), indent=2))"
 
-Usage examples
+Run the secure crypto examples:
 
-- Run static crypto checks against the current repository:
+python3 secure_crypto_examples.py
 
-  python3 -c "from decrypto_crypto_checks import scan_repo_for_crypto_issues; import json, pathlib; print(json.dumps(scan_repo_for_crypto_issues(pathlib.Path('.')), indent=2))"
+Run the live HTTP/OpenAPI auditor (requires explicit authorization):
 
-- Run the secure crypto helper examples:
+python3 decrypto_assumption_scan.py \
+  --url https://example.com/health \
+  --private-url https://example.com/user/profile \
+  --authorized \
+  --cors \
+  --out decrypto_findings
 
-  python3 secure_crypto_examples.py
+Run tests:
 
-- Run the HTTP/OpenAPI auditor (explicit authorization required):
+python -m unittest discover -v
 
-  python3 decrypto_assumption_scan.py \
-    --url https://example.com/health \
-    --private-url https://example.com/user/profile \
-    --authorized \
-    --cors \
-    --out decrypto_findings
+Limitations
 
-- Run unit tests locally:
-
-  python -m unittest discover -v
-
-CI
-
-A GitHub Actions workflow (.github/workflows/ci.yml) runs the Python unit tests.
-
-Limitations and next steps
-
-- The static crypto checks are intentionally conservative regex-based heuristics.
-  They will produce false positives and require language-aware analysis to
-  improve signal-to-noise.
-- No commit-history scanning is performed by default. If you want history-based
-  secret detection (e.g., scanning past commits for leaked keys) confirm first;
-  that is slower and may require additional permissions.
-- The tool is not a replacement for a full cryptographic code review or formal
-  security assessment. Use findings as leads to guide manual review.
-
-Contributing
-
-Contributions, improved detection rules, language-aware analyzers, and better
-false-positive filtering are welcome. Please open pull requests and include
-unit tests for new detections.
+- The static checks are heuristic and may produce false positives.
+- The model is intentionally conservative and does not claim exploitability without owner validation.
+- Optional history-based review is available only as an opt-in, redacted review step.
+- Public CVE references are not proof of impact; they are examples for context and triage.
 
 License
 
-Provided as-is for authorized security review and responsible disclosure
-workflows.
+Provided as-is for authorized security review and responsible disclosure work.
