@@ -3,6 +3,10 @@
 Decrypto is an assumption-driven static and live-audit toolkit for finding unintended
 cryptography implementation bugs and other crypto-related anti-patterns in code.
 
+This project is Python-first. The goal is to perform repo-wide crypto lead detection
+with Python tooling and Python-based sample implementations, while keeping the project
+focused on responsible review rather than confirmed exploitation.
+
 This project is a lead-generation tool for security reviewers and SecOps teams. It
 is NOT a confirmed vulnerability scanner or a cryptographic validator. Findings
 are hypothesis-driven and require owner validation before reporting or remediation.
@@ -14,6 +18,8 @@ Key goals
   and optionally as read-only live HTTP checks for authorized targets.
 - Produce concise, redacted, reproducible leads that a SecOps engineer or
   security reviewer can triage and validate.
+- Keep the project Python-native, using Python implementations for secure crypto
+  examples and relying on Python tooling for static scanning.
 - Avoid storing secret values, response bodies, cookie names/values, redirect
   destinations, or session tokens in outputs.
 
@@ -23,13 +29,12 @@ What it includes
   OpenAPI auditor. Designed to run against explicitly authorized HTTP(S) URLs and
   local OpenAPI JSON files only.
 - decrypto_crypto_checks.py — repo-wide static scanner for crypto implementation
-  anti-patterns (Python + JavaScript by default).
-- js/crypto_utils.js — a small JavaScript helper library demonstrating secure
-  crypto usage with the Web Crypto API (AES-GCM key generation, PBKDF2-based key
-  derivation with recommended iteration counts).
+  anti-patterns in Python source files (and conservative text-based patterns for other source types).
+- secure_crypto_examples.py — Python-native secure crypto helper examples using
+  `secrets` and `hashlib` for random byte generation, password-derived key material,
+  and HMAC verification.
 - tests/ — unit tests for the scanner and the static crypto checks.
-- .github/workflows/ci.yml — CI workflow that runs Python unit tests and
-  performs a basic npm install/audit for the JS helper.
+- .github/workflows/ci.yml — CI workflow that runs the Python unit tests.
 
 Supported checks (snapshot static analysis)
 
@@ -39,10 +44,20 @@ include but are not limited to:
 - Hardcoded-looking long hex/base64 strings and embedded PEM private keys
 - Use of weak or deprecated hashes (md5, sha1, md4)
 - Weak ciphers or insecure modes (ECB, RC4, DES, 3DES)
-- Use of non-cryptographic RNGs or explicit PRNG seeding (random.random(), Math.random(), seedrandom)
-- TLS verification bypass (verify=False, _create_unverified_context, rejectUnauthorized: false, NODE_TLS_REJECT_UNAUTHORIZED)
+- Use of non-cryptographic RNGs or explicit PRNG seeding (random.random(), random.seed())
+- TLS verification bypass (verify=False, _create_unverified_context)
 - PBKDF2 usage (flagged for manual verification of iterations and salt)
-- Potential "rolling-your-own" use of low-level cipher APIs (crypto.createCipher, CryptoJS, Cipher())
+- Potential "rolling-your-own" use of low-level cipher APIs
+
+Python secure crypto examples
+
+The repo now includes a Python-safe crypto reference module that demonstrates
+trusted patterns instead of insecure JavaScript equivalents:
+
+- `secrets.token_bytes()` for cryptographic randomness
+- `hashlib.pbkdf2_hmac()` for password-derived keys with explicit iteration counts
+- `hmac.compare_digest()` for constant-time comparison
+- Explicit hashing/HMAC examples that avoid unsafe defaults
 
 Live HTTP/OpenAPI checks (assumption-driven)
 
@@ -65,7 +80,11 @@ Usage examples
 
 - Run static crypto checks against the current repository:
 
-  python3 -c "from decrypto_crypto_checks import scan_repo_for_crypto_issues; import json; print(json.dumps(scan_repo_for_crypto_issues(__import__('pathlib').Path('.')), indent=2))"
+  python3 -c "from decrypto_crypto_checks import scan_repo_for_crypto_issues; import json, pathlib; print(json.dumps(scan_repo_for_crypto_issues(pathlib.Path('.')), indent=2))"
+
+- Run the secure crypto helper examples:
+
+  python3 secure_crypto_examples.py
 
 - Run the HTTP/OpenAPI auditor (explicit authorization required):
 
@@ -82,8 +101,7 @@ Usage examples
 
 CI
 
-A GitHub Actions workflow (.github/workflows/ci.yml) runs the Python unit tests
-and performs a basic npm install & audit for the JS helper (if present).
+A GitHub Actions workflow (.github/workflows/ci.yml) runs the Python unit tests.
 
 Limitations and next steps
 
