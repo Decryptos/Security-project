@@ -1,0 +1,8 @@
+{
+  "name": "security-project-js",
+  "version": "0.1.0",
+  "description": "Small helper lib for Security-project demonstrating secure crypto usage",
+  "main": "crypto_utils.js",
+  "type": "module",
+  "license": "MIT"
+}
