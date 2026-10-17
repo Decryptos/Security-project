@@ -24,6 +24,26 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPHandler, HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from urllib.parse import urlsplit, urlunsplit
+
+def normalize_url(url: str) -> str:
+    p = urlsplit(url)
+    if p.scheme not in ("http", "https") or not p.hostname:
+        raise ValueError(f"Invalid URL: {url}")
+    host = p.hostname.lower()
+    scheme = p.scheme.lower()
+
+    # canonicalize default ports
+    port = p.port
+    if (scheme == "https" and port == 443) or (scheme == "http" and port == 80):
+        port = None
+
+    netloc = host if port is None else f"{host}:{port}"
+    path = p.path or "/"
+
+    # clear query/fragment because they are not part of the endpoint identity here
+    return urlunsplit((scheme, netloc, path, "", ""))
+
 
 VERSION = "1.1"
 MARKER_ORIGIN = "https://audit-origin.invalid"  # Not an attacker-controlled server.
