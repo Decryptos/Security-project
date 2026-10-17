@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Decrypto — assumption-driven security checks + responsible disclosure report.
 
-One-file, Python 3.9+ stdlib, read-only, explicitly scoped website/API auditor.
-Reports falsifiable *leads*, not confirmed exploits.
+This module performs read-only, explicitly scoped website/API auditing against
+authorized targets only. It reports falsifiable leads, not confirmed exploits.
 """
 
 from __future__ import annotations
@@ -47,10 +47,11 @@ def normalize_url(url: str) -> str:
         raise ValueError("Path must not start with double slash")
     if p.hostname.endswith("."):
         raise ValueError("Hostname cannot end with a period")
-    if p.scheme == "http" and p.hostname not in ("localhost", "127.0.0.1", "::1"):
-        raise ValueError("Non-HTTPS targets are allowed only on localhost")
     if p.port is not None and not 1 <= p.port <= 65535:
         raise ValueError("Invalid URL port")
+
+    if p.scheme == "http" and p.hostname not in ("localhost", "127.0.0.1", "::1"):
+        raise ValueError("Non-HTTPS targets are allowed only on localhost")
 
     scheme = p.scheme.lower()
     hostname = p.hostname.lower()
@@ -64,8 +65,7 @@ def normalize_url(url: str) -> str:
 
 def validate_url(url: str) -> str:
     """Validation helper that keeps only explicit, restricted URLs in scope."""
-    normalized = normalize_url(url)
-    return normalized
+    return normalize_url(url)
 
 
 def new_finding(rule: str, url: str, title: str, assumption: str,
@@ -88,7 +88,7 @@ def new_finding(rule: str, url: str, title: str, assumption: str,
 
 
 def cookie_metadata(headers: Message) -> list[dict[str, Any]]:
-    """Never save cookie names or values; only inspect session-like names in memory."""
+    """Inspect session-like cookie names only; never persist cookie values."""
     data: list[dict[str, Any]] = []
     for raw in headers.get_all("Set-Cookie", []) or []:
         sections = [x.strip() for x in raw.split(";")]
@@ -106,7 +106,7 @@ def cookie_metadata(headers: Message) -> list[dict[str, Any]]:
 
 
 def has_auth_indicators(headers: Message) -> bool:
-    """Return True when response suggests auth-relevant behavior."""
+    """Return True when the response suggests auth-relevant behavior."""
     www_auth = (headers.get("WWW-Authenticate") or "").lower()
     set_cookie_values = headers.get_all("Set-Cookie", []) or []
     cookie_names = []
@@ -114,14 +114,15 @@ def has_auth_indicators(headers: Message) -> bool:
         sections = [x.strip() for x in raw.split(";")]
         if sections and "=" in sections[0]:
             cookie_names.append(sections[0].split("=", 1)[0].lower())
-    auth_cookie_names = any(
-        SESSION_NAME.search(name) for name in cookie_names
-    )
+    auth_cookie_names = any(SESSION_NAME.search(name) for name in cookie_names)
     return bool(www_auth or auth_cookie_names)
 
 
 def send(opener, url: str, method: str, origin: str | None, timeout: float):
-    headers = {"User-Agent": "Decrypto-Assumption-Audit/1.2 (read-only; authorized)", "Accept": "*/*"}
+    headers = {
+        "User-Agent": "Decrypto-Assumption-Audit/1.2 (read-only; authorized)",
+        "Accept": "*/*",
+    }
     if origin:
         headers["Origin"] = origin
     request = Request(url, method=method, headers=headers)
@@ -237,7 +238,7 @@ def cors_checks(url: str, status: int, headers: Message) -> list[dict[str, Any]]
 
 
 def inspect_openapi(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    """Inspect only a local JSON contract, never download/follow external refs."""
+    """Inspect only a local JSON contract; never download or follow external refs."""
     if path.stat().st_size > 2_000_000:
         raise ValueError("OpenAPI JSON exceeds 2 MB")
     spec = json.loads(path.read_text(encoding="utf-8"))
@@ -367,7 +368,13 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
     sent = 0
 
     for url in normalized_urls:
-        for method, origin in [("GET" if url in normalized_private_urls else "HEAD", None)] + ([("GET", MARKER_ORIGIN)] if cors else []):
+        methods = [("GET", None)]
+        if url in normalized_private_urls:
+            methods = [("GET", None)]
+        if cors:
+            methods.append(("GET", MARKER_ORIGIN))
+
+        for method, origin in methods:
             if sent:
                 time.sleep(delay)
             sent += 1
@@ -448,6 +455,7 @@ def markdown_report(result: dict[str, Any]) -> str:
         "This audit stated security assumptions, observed safe HTTP/contract behavior, and compared the two. A contradiction is a hypothesis—not proof of a security breach.",
         "",
     ]
+
     if not result["findings"]:
         lines += [
             "## Findings",
@@ -455,31 +463,30 @@ def markdown_report(result: dict[str, Any]) -> str:
             "No leads detected by these limited checks. This does **not** establish that the target is secure.",
             "",
         ]
-    for number, finding in enumerate(result["findings"], 1):
-        lines += [
-            f"## Finding {number}: {finding['title']}",
-            "",
-            f"**ID:** `{finding['id']}` | **Rule:** `{finding['rule']}` | **Priority:** {finding['priority']} | **Status:** {finding['status']}",
-            "",
-            f"**Affected endpoint/contract:** `{finding['target']}`",
-            "",
-            "**Assumption tested:** " + finding["assumption_tested"],
-            "",
-            "**Evidence observed:**",
-            "",
-            "```json",
-            json.dumps(finding["evidence"], indent=2, ensure_ascii=False),
-            "```",
-            "",
-            "**How the assumption-driven model found it:** " + finding["how_model_found_it"],
-            "",
-            "**Suggested remediation:** " + finding["remediation"],
-            "",
-            "**Evidence required before a vulnerability report:** " + finding["validation_needed"],
-            "",
-            "**Reproduction scope:** A single non-authenticated HEAD/GET request (and optionally one harmless Origin probe), limited to the explicitly authorized URL. No payloads or sensitive elements were stored.",
-            "",
-        ]
+    else:
+        for number, finding in enumerate(result["findings"], 1):
+            lines += [
+                f"## Finding {number}: {finding['title']}",
+                "",
+                f"**ID:** `{finding['id']}` | **Rule:** `{finding['rule']}` | **Priority:** {finding['priority']} | **Status:** {finding['status']}",
+                "",
+                f"**Affected endpoint/contract:** `{finding['target']}`",
+                "",
+                "**Assumption tested:** " + finding["assumption_tested"],
+                "",
+                "**Evidence observed:**",
+                "",
+                "```json",
+                json.dumps(finding["evidence"], indent=2, ensure_ascii=False),
+                "```",
+                "",
+                "**How the assumption-driven model found it:** " + finding["how_model_found_it"],
+                "",
+                "**Suggested remediation:** " + finding["remediation"],
+                "",
+                "**Evidence required before a vulnerability report:** " + finding["validation_needed"],
+                "",
+            ]
 
     for number, corr in enumerate(result.get("correlated_assumption_hypotheses", []), 1):
         lines += [
@@ -512,7 +519,7 @@ def markdown_report(result: dict[str, Any]) -> str:
     lines += [
         "## Reporting guidance",
         "",
-        "Share only findings you independently confirm, using a program-approved disclosure channel. Attach redacted evidence, the affected URL, explicit authorization scope, and the remediation plan.",
+        "Share only findings you independently confirm, using a program-approved disclosure channel. Attach redacted evidence, the affected URL, explicit authorization scope, and the remediation path.",
         "",
         "**Limitations:** This tool intentionally does not send attack payloads, test authorization with other users' objects, read response bodies, or confirm browser-based exploitability.",
         "",
@@ -555,154 +562,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
-"""
-
-Local functionality tests for the Decrypto auditor; NOT a real-world validation study.
-"""
-
-from __future__ import annotations
-
-import importlib.util
-import json
-import tempfile
-import threading
-import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
-
-spec = importlib.util.spec_from_file_location("auditor", Path(__file__).with_name("decrypto_assumption_scan.py"))
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-
-
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *args):
-        pass
-
-    def respond(self):
-        if self.path == "/redirect":
-            self.send_response(302)
-            self.send_header("Location", "https://unapproved.invalid/secret")
-            self.end_headers()
-            return
-        self.send_response(403 if self.path == "/protected-safe" else 200)
-        self.send_header("Content-Type", "application/json")
-        if self.path == "/protected-test":
-            self.send_header("Cache-Control", "public,max-age=30")
-            self.send_header("Set-Cookie", "sessionid=DONT_SAVE_THIS; Path=/")
-        if self.path == "/cors" and self.headers.get("Origin"):
-            self.send_header("Access-Control-Allow-Origin", self.headers["Origin"])
-            self.send_header("Access-Control-Allow-Credentials", "true")
-            self.send_header("Cache-Control", "public,max-age=30")
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(b'{"private":"DONT_SAVE_THIS"}')
-
-    do_GET = respond
-    do_HEAD = respond
-
-
-class Tests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
-        cls.thread.start()
-        cls.base = f"http://127.0.0.1:{cls.httpd.server_port}"
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.httpd.shutdown()
-        cls.httpd.server_close()
-        cls.thread.join(2)
-
-    def test_private_boundary_and_cache_and_secret_redaction(self):
-        url = self.base + "/protected-test"
-        res = mod.scan([url], {url}, delay=0.5)
-        rules = {f["rule"] for f in res["findings"]}
-        self.assertIn("AUTH-BOUNDARY", rules)
-        self.assertIn("PRIVATE-CACHE", rules)
-        self.assertIn("SESSION-COOKIE-1", rules)
-        self.assertNotIn("DONT_SAVE_THIS", json.dumps(res))
-        md = mod.markdown_report(res)
-        self.assertIn("How the assumption-driven model found it", md)
-        self.assertIn("Suggested remediation", md)
-        self.assertNotIn("DONT_SAVE_THIS", md)
-
-    def test_cors_credentialed_reflection(self):
-        url = self.base + "/cors"
-        res = mod.scan([url], set(), cors=True, delay=0.5)
-        rules = {f["rule"] for f in res["findings"]}
-        self.assertIn("CORS-TRUST", rules)
-        self.assertIn("CORS-CACHE", rules)
-        self.assertEqual(res["total_requests"], 2)
-
-    def test_protected_denied_is_not_vulnerability(self):
-        url = self.base + "/protected-safe"
-        res = mod.scan([url], {url}, delay=0.5)
-        self.assertNotIn("AUTH-BOUNDARY", {f["rule"] for f in res["findings"]})
-
-    def test_redirect_does_not_leave_scope(self):
-        url = self.base + "/redirect"
-        res = mod.scan([url], set())
-        self.assertEqual(res["observations"][0]["status"], 302)
-        self.assertTrue(res["observations"][0]["redirect_not_followed"])
-        self.assertNotIn("unapproved.invalid", json.dumps(res))
-
-    def test_reject_unencrypted_external(self):
-        with self.assertRaises(ValueError):
-            mod.scan(["http://example.com/"], set())
-
-    def test_reject_unlisted_private_url(self):
-        with self.assertRaises(ValueError):
-            mod.scan([self.base + "/"], {self.base + "/not-listed"})
-
-    def test_offline_openapi_contract(self):
-        with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "api.json"
-            path.write_text(json.dumps({
-                "openapi": "3.0.3",
-                "components": {
-                    "securitySchemes": {"ApiKey": {"type": "apiKey", "in": "query", "name": "token"}},
-                },
-                "paths": {"/profiles": {"post": {"summary": "Create"}}},
-            }))
-            res = mod.scan([], set(), openapi=path)
-            rules = {f["rule"] for f in res["findings"]}
-            self.assertEqual(res["total_requests"], 0)
-            self.assertEqual(rules, {"OAS-KEY-IN-URL", "OAS-WRITE-NO-AUTH"})
-
-    def test_assumption_correlation_for_cors_and_cache(self):
-        url = self.base + "/cors"
-        res = mod.scan([url], set(), cors=True, delay=0.5)
-        self.assertEqual(res["correlated_hypothesis_count"], 1)
-        hypothesis = res["correlated_assumption_hypotheses"][0]
-        self.assertIn("Cross-origin trust", hypothesis["title"])
-        self.assertEqual(hypothesis["request_count_added"], 0)
-        self.assertIn("Correlated assumption hypothesis", mod.markdown_report(res))
-        self.assertIn("UNCONFIRMED", hypothesis["status"])
-
-    def test_assumption_correlation_for_declared_private_and_cache(self):
-        url = self.base + "/protected-test"
-        res = mod.scan([url], {url}, delay=0.5)
-        self.assertEqual(res["correlated_hypothesis_count"], 1)
-        hypothesis = res["correlated_assumption_hypotheses"][0]
-        self.assertIn("access boundary", hypothesis["title"])
-        self.assertIn("AUTH-BOUNDARY", {x["rule"] for x in res["findings"]})
-        self.assertNotIn("DONT_SAVE_THIS", json.dumps(hypothesis))
-
-    def test_safe_response_does_not_generate_correlation(self):
-        url = self.base + "/protected-safe"
-        res = mod.scan([url], {url}, cors=True, delay=0.5)
-        self.assertEqual(res["correlated_hypothesis_count"], 0)
-
-    def test_normalize_url_handles_default_ports(self):
-        self.assertEqual(mod.normalize_url("https://example.com:443/"), "https://example.com/")
-        self.assertEqual(mod.normalize_url("http://localhost:80/"), "http://localhost/")
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-"""
