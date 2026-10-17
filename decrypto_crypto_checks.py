@@ -5,6 +5,12 @@ This module scans a repository snapshot (files under a given root) for common
 crypto implementation anti-patterns and insecure usages in Python and JavaScript
 source files. It is intentionally conservative and reports leads for manual
 review, not confirmed vulnerabilities.
+
+The rule taxonomy is aligned to public CWE families used in the broader
+security ecosystem, especially for weak cryptographic algorithms, insecure RNG,
+key material handling, and certificate validation bypasses. Findings are
+reported as assumptions requiring owner validation; they are not confirmed
+exploits.
 """
 from __future__ import annotations
 
@@ -14,15 +20,64 @@ import re
 from pathlib import Path
 from typing import Any
 
-# Reuse the new_finding factory shape from the main scanner by reconstructing a
-# compatible minimal function here. The main module will merge findings.
+# Public CWE mapping used as the canonical taxonomy for the assumption-driven
+# crypto model. These are not formal CVE declarations; they are the framework
+# used to classify likely crypto implementation weaknesses.
+CWE_RULES: dict[str, dict[str, str]] = {
+    "CRYPTO-HARDKEY": {
+        "cwe": "CWE-321",
+        "title": "Use of Hard-coded Cryptographic Key",
+        "url": "https://cwe.mitre.org/data/definitions/321.html",
+    },
+    "CRYPTO-PEM-IN-CODE": {
+        "cwe": "CWE-321",
+        "title": "Use of Hard-coded Cryptographic Key",
+        "url": "https://cwe.mitre.org/data/definitions/321.html",
+    },
+    "CRYPTO-WEAK-HASH": {
+        "cwe": "CWE-327",
+        "title": "Use of a Broken or Risky Cryptographic Algorithm",
+        "url": "https://cwe.mitre.org/data/definitions/327.html",
+    },
+    "CRYPTO-WEAK-CIPHER": {
+        "cwe": "CWE-327",
+        "title": "Use of a Broken or Risky Cryptographic Algorithm",
+        "url": "https://cwe.mitre.org/data/definitions/327.html",
+    },
+    "CRYPTO-INSECURE-RNG": {
+        "cwe": "CWE-330",
+        "title": "Use of Insufficiently Random Values",
+        "url": "https://cwe.mitre.org/data/definitions/330.html",
+    },
+    "CRYPTO-TLS-WORKAROUND": {
+        "cwe": "CWE-295",
+        "title": "Improper Certificate Validation",
+        "url": "https://cwe.mitre.org/data/definitions/295.html",
+    },
+    "CRYPTO-PBKDF2": {
+        "cwe": "CWE-916",
+        "title": "Use of Password Hash With Insufficient Computational Effort",
+        "url": "https://cwe.mitre.org/data/definitions/916.html",
+    },
+    "CRYPTO-POTENTIALLY-ROLLING": {
+        "cwe": "CWE-327",
+        "title": "Use of a Broken or Risky Cryptographic Algorithm",
+        "url": "https://cwe.mitre.org/data/definitions/327.html",
+    },
+}
+
 
 def _id_for(rule: str, target: str) -> str:
     return hashlib.sha256((rule + "|" + target).encode()).hexdigest()[:10].upper()
 
 
 def _make_finding(rule: str, target: str, title: str, evidence: dict[str, Any], priority: str = "review") -> dict[str, Any]:
-    return {
+    metadata = CWE_RULES.get(rule, {
+        "cwe": "CWE-693",
+        "title": "Protection Mechanism Failure",
+        "url": "https://cwe.mitre.org/data/definitions/693.html",
+    })
+    finding = {
         "id": _id_for(rule, target),
         "rule": rule,
         "target": target,
@@ -32,7 +87,10 @@ def _make_finding(rule: str, target: str, title: str, evidence: dict[str, Any], 
         "evidence_class": "static_code_finding",
         "evidence": evidence,
         "remediation": evidence.get("remediation", "Review and fix the highlighted usage."),
+        "cwe": {"id": metadata["cwe"], "title": metadata["title"], "url": metadata["url"]},
+        "confidence": "medium",
     }
+    return finding
 
 
 # Patterns to flag. These are heuristics and must be reviewed manually.
@@ -88,7 +146,6 @@ def scan_repo_for_crypto_issues(root: Path, languages: list[str] | None = None) 
         lang = _file_language(path)
         if lang is None or lang not in languages:
             continue
-        # Skip large binary files
         try:
             text = path.read_text(encoding="utf-8")
         except Exception:
@@ -97,7 +154,6 @@ def scan_repo_for_crypto_issues(root: Path, languages: list[str] | None = None) 
         for pat, rule, title in _PATTERNS:
             for m in re.finditer(pat, text):
                 snippet = text[max(0, m.start() - 40):min(len(text), m.end() + 40)]
-                # Do not include long secrets in evidence; only include a redacted excerpt
                 excerpt = re.sub(r"[A-Za-z0-9+/=]{8,}", "<REDACTED>", snippet)
                 evidence = {
                     "file": str(path.relative_to(root)),
@@ -110,12 +166,37 @@ def scan_repo_for_crypto_issues(root: Path, languages: list[str] | None = None) 
     return {"findings": findings, "meta": meta}
 
 
+def _history_scan_for_crypto(patterns: list[str] | None = None) -> list[dict[str, Any]]:
+    """Placeholder for opt-in history scanning.
+
+    This intentionally does not process actual Git history by default. It requires the
+    user to opt-in to an explicit git-history review. The purpose is to keep the model
+    aligned with public CWE and CVE families without assuming a live exploit.
+    """
+    if patterns is None:
+        patterns = [
+            "CRYPTO-HARDKEY",
+            "CRYPTO-PEM-IN-CODE",
+            "CRYPTO-WEAK-HASH",
+            "CRYPTO-WEAK-CIPHER",
+            "CRYPTO-INSECURE-RNG",
+            "CRYPTO-TLS-WORKAROUND",
+        ]
+    return [{
+        "rule": rule,
+        "cwe": CWE_RULES.get(rule, {"cwe": "CWE-693", "title": "Protection Mechanism Failure", "url": "https://cwe.mitre.org/data/definitions/693.html"})["cwe"],
+        "status": "UNCONFIRMED — requires validation in git history context",
+    } for rule in patterns]
+
+
 if __name__ == "__main__":
     import argparse
-    from pathlib import Path
 
     p = argparse.ArgumentParser()
     p.add_argument("root", nargs="?", default=Path.cwd())
+    p.add_argument("--history", action="store_true", help="Opt-in placeholder for git-history review")
     args = p.parse_args()
     res = scan_repo_for_crypto_issues(Path(args.root))
+    if args.history:
+        res["history_scan"] = _history_scan_for_crypto()
     print(json.dumps(res, indent=2))
