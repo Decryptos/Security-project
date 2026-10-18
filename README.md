@@ -90,6 +90,7 @@ Usage examples
 
   python3 decrypto_assumption_scan.py \
     --url https://example.com/health \
+    --url https://example.com/user/profile \
     --private-url https://example.com/user/profile \
     --authorized \
     --cors \
@@ -97,11 +98,41 @@ Usage examples
 
 - Run unit tests locally:
 
-  python -m unittest discover -v
+  python tools/run_tests.py
 
 CI
 
-A GitHub Actions workflow (.github/workflows/ci.yml) runs the Python unit tests.
+The CI workflow compiles Python sources, runs regression tests on Python 3.9,
+3.12 and 3.14, and smoke-tests the CLI. The test runner fails if no tests are
+discovered. Tests use temporary files and a loopback HTTP fixture only; CI does
+not audit external targets. Python 3.9 is a compatibility check, not a deployment
+recommendation; use a supported Python release for normal operation.
+
+The security workflow runs Gitleaks secret scanning and Python CodeQL analysis
+on pushes, pull requests and a weekly schedule. Actions are pinned to commit
+SHAs and tracked by the existing GitHub Actions Dependabot configuration.
+Workflow tokens default to read-only access; only the CodeQL job requests
+security-event write access. Checkouts do not persist credentials, and Gitleaks
+PR comments and artifact uploads are disabled.
+
+There are currently no third-party Python runtime dependencies. The previous
+bare `pip-audit` command audited the runner environment rather than a project
+manifest, so that misleading job has been removed. When adding dependencies,
+commit a versioned dependency manifest and add a manifest-targeted audit gate.
+
+Repository administrators should require the CI and security checks in branch
+protection before merging. Workflow files alone do not enforce merge protection.
+CodeQL availability also depends on the repository's GitHub security settings.
+
+Authentication and sensitive output
+
+The auditor sends anonymous requests; it does not accept passwords, session
+cookies or bearer tokens. `--authorized` is an operator permission assertion,
+not an authentication mechanism. URL validation errors do not echo rejected
+credential-bearing URLs. The standalone crypto demonstration prints sizes and
+a verification result instead of derived key material. Reports still contain
+endpoint paths and selected metadata: do not put secrets in URL paths or assume
+all arbitrary server-provided metadata is automatically sanitized.
 
 Limitations and next steps
 
