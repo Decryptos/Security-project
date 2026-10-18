@@ -1,0 +1,31 @@
+name: Benchmark
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  run-benchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Run benchmark CLI
+        run: |
+          python -m decrypto_framework.benchmark_cli --suite resources/benchmarks/default_suite.json --out-json artifacts/benchmarks/result.json --out-md artifacts/benchmarks/result.md
+
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: decrypto-benchmark-results
+          path: artifacts/benchmarks/

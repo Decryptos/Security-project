@@ -1,0 +1,26 @@
+[
+  {
+    "name": "signature-only leak",
+    "target": "example.com/auth",
+    "conventional_findings": ["CVE-2024-0001", "TLS-weak-config"],
+    "assumption_findings": ["CVE-2024-0001", "AUTH-BOUNDARY", "PRIVATE-CACHE"],
+    "expected_unique_assumption_findings": ["AUTH-BOUNDARY", "PRIVATE-CACHE"],
+    "note": "This scenario simulates a legacy vulnerability signature plus a trust-boundary mismatch the conventional scanner misses."
+  },
+  {
+    "name": "cors-cache boundary issue",
+    "target": "api.example.com/cors",
+    "conventional_findings": ["CORS-ALLOW-ALL"],
+    "assumption_findings": ["CORS-ALLOW-ALL", "CORS-TRUST", "CORS-CACHE"],
+    "expected_unique_assumption_findings": ["CORS-TRUST", "CORS-CACHE"],
+    "note": "The conventional scanner sees a permissive CORS policy but misses the cache and origin-correlation issue."
+  },
+  {
+    "name": "weak cryptography without known signature",
+    "target": "internal.example.net/session",
+    "conventional_findings": ["WEAK-HASH"],
+    "assumption_findings": ["WEAK-HASH", "SESSION-COOKIE-MISSING-FLAGS", "TRUST-CACHE-PRIVATE"],
+    "expected_unique_assumption_findings": ["SESSION-COOKIE-MISSING-FLAGS", "TRUST-CACHE-PRIVATE"],
+    "note": "This scenario demonstrates hidden dependency between session safeguards and cache assumptions."
+  }
+]
