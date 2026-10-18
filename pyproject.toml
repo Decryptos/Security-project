@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "decrypto-framework"
+version = "0.1.0"
+description = "Assumption-driven security research framework for Decrypto"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "SnipeMaster" }]
+dependencies = []
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
