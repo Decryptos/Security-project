@@ -36,31 +36,54 @@ def _make_finding(rule: str, target: str, title: str, evidence: dict[str, Any], 
 
 
 # Patterns to flag. These are heuristics and must be reviewed manually.
+# Compile once at import time so each repository scan reuses the same regex objects
+# rather than recompiling them for every file and every rule.
 _PATTERNS = [
     # Hardcoded-looking long hex or base64 strings (possible keys/secrets)
-    (r"(?i)\b([0-9a-f]{32,}|[A-Za-z0-9+/]{32,}={0,2})\b", "CRYPTO-HARDKEY", "Possible hardcoded key or secret literal"),
+    (re.compile(r"(?i)\b([0-9a-f]{32,}|[A-Za-z0-9+/]{32,}={0,2})\b"), "CRYPTO-HARDKEY", "Possible hardcoded key or secret literal"),
 
     # PEM private keys in files
-    (r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----", "CRYPTO-PEM-IN-CODE", "Private key PEM embedded in repository"),
+    (re.compile(r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----"), "CRYPTO-PEM-IN-CODE", "Private key PEM embedded in repository"),
 
     # Weak hashes
-    (r"\b(md5|sha1|md4)\b", "CRYPTO-WEAK-HASH", "Use of deprecated or weak hash algorithm"),
+    (re.compile(r"\b(md5|sha1|md4)\b"), "CRYPTO-WEAK-HASH", "Use of deprecated or weak hash algorithm"),
 
     # Insecure ciphers/modes
-    (r"\b(aes-?ecb|des|rc4|3des|tripledes)\b", "CRYPTO-WEAK-CIPHER", "Use of weak cipher or insecure mode (ECB/RC4/DES)"),
+    (re.compile(r"\b(aes-?ecb|des|rc4|3des|tripledes)\b"), "CRYPTO-WEAK-CIPHER", "Use of weak cipher or insecure mode (ECB/RC4/DES)"),
 
     # Insecure RNG usage in Python or JS
-    (r"\brandom\.random\(|\brandom\.seed\(|\bMath\.random\(|\bseedrandom\b", "CRYPTO-INSECURE-RNG", "Use of non-cryptographic RNG or explicit seeding"),
+    (re.compile(r"\brandom\.random\(|\brandom\.seed\(|\bMath\.random\(|\bseedrandom\b"), "CRYPTO-INSECURE-RNG", "Use of non-cryptographic RNG or explicit seeding"),
 
     # Disabling TLS certificate validation
-    (r"\bverify\s*=\s*False\b|_create_unverified_context|rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED", "CRYPTO-TLS-WORKAROUND", "TLS certificate validation disabled or bypassed"),
+    (re.compile(r"\bverify\s*=\s*False\b|_create_unverified_context|rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED"), "CRYPTO-TLS-WORKAROUND", "TLS certificate validation disabled or bypassed"),
 
     # Weak PBKDF2 iterations (heuristic: small iteration numbers near pbkdf2 calls)
-    (r"(?i)pbkdf2\b", "CRYPTO-PBKDF2", "PBKDF2 use detected — verify iterations and salt usage"),
+    (re.compile(r"(?i)pbkdf2\b"), "CRYPTO-PBKDF2", "PBKDF2 use detected — verify iterations and salt usage"),
 
     # Rolling-your-own crypto (use of low-level primitives without AE)
-    (r"\b(createCipher\b|Cipher\(|crypto\.createCipher|CryptoJS)", "CRYPTO-POTENTIALLY-ROLLING", "Potential use of low-level cipher APIs; ensure authenticated encryption and correct IV/nonce usage"),
+    (re.compile(r"\b(createCipher\b|Cipher\(|crypto\.createCipher|CryptoJS)"), "CRYPTO-POTENTIALLY-ROLLING", "Potential use of low-level cipher APIs; ensure authenticated encryption and correct IV/nonce usage"),
 ]
+
+
+def _match_excerpt(text: str, start: int, end: int) -> str:
+    """Return a short, redacted snippet for evidence without re-scanning large strings."""
+    snippet = text[max(0, start - 40):min(len(text), end + 40)]
+    return re.sub(r"[A-Za-z0-9+/=]{8,}", "<REDACTED>", snippet)[:200]
+
+
+def _scan_text(path: Path, root: Path, text: str) -> list[dict[str, Any]]:
+    """Scan a file once against the compiled regex list and collect findings."""
+    findings: list[dict[str, Any]] = []
+    relative_path = str(path.relative_to(root))
+    for pattern, rule, title in _PATTERNS:
+        for m in pattern.finditer(text):
+            evidence = {
+                "file": relative_path,
+                "line": text.count("\n", 0, m.start()) + 1,
+                "match_excerpt": _match_excerpt(text, m.start(), m.end()),
+            }
+            findings.append(_make_finding(rule, evidence["file"], title, evidence))
+    return findings
 
 
 def _file_language(path: Path) -> str | None:
@@ -88,23 +111,13 @@ def scan_repo_for_crypto_issues(root: Path, languages: list[str] | None = None) 
         lang = _file_language(path)
         if lang is None or lang not in languages:
             continue
-        # Skip large binary files
+        # Skip large binary files; the scanner is intentionally heuristic-based.
         try:
             text = path.read_text(encoding="utf-8")
         except Exception:
             continue
         inspected += 1
-        for pat, rule, title in _PATTERNS:
-            for m in re.finditer(pat, text):
-                snippet = text[max(0, m.start() - 40):min(len(text), m.end() + 40)]
-                # Do not include long secrets in evidence; only include a redacted excerpt
-                excerpt = re.sub(r"[A-Za-z0-9+/=]{8,}", "<REDACTED>", snippet)
-                evidence = {
-                    "file": str(path.relative_to(root)),
-                    "line": text.count("\n", 0, m.start()) + 1,
-                    "match_excerpt": excerpt[:200],
-                }
-                findings.append(_make_finding(rule, evidence["file"], title, evidence))
+        findings.extend(_scan_text(path, root, text))
 
     meta = {"files_inspected": inspected, "languages": languages, "finding_count": len(findings)}
     return {"findings": findings, "meta": meta}
