@@ -48,6 +48,7 @@ include but are not limited to:
 - TLS verification bypass (verify=False, _create_unverified_context)
 - PBKDF2 usage (flagged for manual verification of iterations and salt)
 - Potential "rolling-your-own" use of low-level cipher APIs
+- Python AST leads for syntactically fixed AES-GCM / ChaCha20-Poly1305 encryption nonces (no secret values recorded)
 
 Python secure crypto examples
 
@@ -136,7 +137,8 @@ all arbitrary server-provided metadata is automatically sanitized.
 
 Limitations and next steps
 
-- The static crypto checks are intentionally conservative regex-based heuristics.
+- AEAD nonce analysis is source-only: it does not establish runtime key/nonce reuse and may miss aliases, helper functions, or complex control flow.
+- The static crypto checks are intentionally conservative regex-based heuristics, supplemented by a narrow Python AST rule.
   They will produce false positives and require language-aware analysis to
   improve signal-to-noise.
 - No commit-history scanning is performed by default. If you want history-based
