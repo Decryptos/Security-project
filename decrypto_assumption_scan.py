@@ -22,6 +22,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPHandler, HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from decrypto_validation import ORIGINS, evaluate_cors_pair, metadata
 
 VERSION = "1.2"
 MARKER_ORIGIN = "https://audit-origin.invalid"
@@ -342,7 +343,8 @@ def correlate_assumptions(findings: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
-         delay: float = 1.0, timeout: float = 6.0, openapi: Path | None = None) -> dict[str, Any]:
+         delay: float = 1.0, timeout: float = 6.0, openapi: Path | None = None,
+         verify_cors: bool = False) -> dict[str, Any]:
     if len(urls) > 12 or len(urls) != len(set(urls)):
         raise ValueError("Use at most 12 different, explicitly listed URLs per run")
 
@@ -354,6 +356,8 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
             seen.add(canonical)
             normalized_urls.append(canonical)
 
+    if verify_cors and len(normalized_urls) > 8:
+        raise ValueError("Paired CORS verification is limited to 8 URLs and 24 total requests")
     normalized_private_urls = {validate_url(u) for u in private_urls}
     if not normalized_private_urls.issubset(set(normalized_urls)):
         raise ValueError("Every --private-url must be included in --url")
@@ -366,9 +370,11 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
     observations: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     sent = 0
+    paired_verification: list[dict[str, Any]] = []
 
     for url in normalized_urls:
-        for method, origin in [("GET" if url in normalized_private_urls else "HEAD", None)] + ([("GET", MARKER_ORIGIN)] if cors else []):
+        pair_samples: list[dict[str, Any]] = []
+        for method, origin in [("GET" if url in normalized_private_urls else "HEAD", None)] + ([("GET", MARKER_ORIGIN)] if cors or verify_cors else []) + ([("GET", ORIGINS[1])] if verify_cors else []):
             if sent:
                 time.sleep(delay)
             sent += 1
@@ -385,9 +391,14 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
                 "redirect_not_followed": 300 <= status < 400,
             })
             if origin:
-                findings.extend(cors_checks(url, status, headers))
+                if verify_cors:
+                    pair_samples.append(metadata(origin, status, headers))
+                if origin == MARKER_ORIGIN:
+                    findings.extend(cors_checks(url, status, headers))
             else:
                 findings.extend(observe(url, status, headers, url in normalized_private_urls))
+        if verify_cors:
+            paired_verification.append(evaluate_cors_pair(url, pair_samples))
 
     api_meta = None
     if openapi:
@@ -415,6 +426,7 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
         "correlated_assumption_hypotheses": correlated,
         "correlated_hypothesis_count": len(correlated),
         "observations": observations,
+        "paired_cors_verification": paired_verification,
         "errors": errors,
         "openapi_review": api_meta,
         "not_tested": [
@@ -526,6 +538,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--url", action="append", default=[], help="Exact authorized HTTP(S) URL; repeat for more URLs (max 12)")
     parser.add_argument("--private-url", action="append", default=[], help="One of --url values that should deny anonymous GET")
     parser.add_argument("--cors", action="store_true", help="Add one credential-free GET per URL with innocuous Origin")
+    parser.add_argument("--verify-cors", action="store_true", help="Compare two credential-free Origin probes; never proves exploitability")
     parser.add_argument("--openapi", type=Path, help="Optional LOCAL OpenAPI JSON specification to review offline")
     parser.add_argument("--authorized", action="store_true", help="Affirm explicit permission for every HTTP target")
     parser.add_argument("--delay", type=float, default=1, help="Seconds between requests (minimum 0.5)")
@@ -537,11 +550,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("Provide --url or --openapi")
     if args.url and not args.authorized:
         parser.error("Web/API tests require --authorized AND permission from the asset owner")
-    if len(args.url) * (2 if args.cors else 1) > 24:
+    if len(args.url) * (3 if args.verify_cors else 2 if args.cors else 1) > 24:
         parser.error("Maximum of 24 requests per run")
 
     try:
-        result = scan(args.url, set(args.private_url), cors=args.cors, delay=args.delay, timeout=args.timeout, openapi=args.openapi)
+        result = scan(args.url, set(args.private_url), cors=args.cors, delay=args.delay, timeout=args.timeout, openapi=args.openapi, verify_cors=args.verify_cors)
         json_path = args.out.with_suffix(".json")
         md_path = args.out.with_suffix(".md")
         json_path.parent.mkdir(parents=True, exist_ok=True)

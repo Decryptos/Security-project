@@ -60,6 +60,23 @@ trusted patterns instead of insecure JavaScript equivalents:
 - `hmac.compare_digest()` for constant-time comparison
 - Explicit hashing/HMAC examples that avoid unsafe defaults
 
+## Paired CORS verification (authorized websites only)
+
+For explicit permissioned URLs, use `--verify-cors` to compare two benign,
+credential-free GET requests with different Origin values. This is a bounded,
+read-only **policy consistency** check, not an exploitation test or proof of
+cross-account access. Up to eight URLs (24 requests) can be checked per run.
+
+```bash
+python3 decrypto_assumption_scan.py --url https://your-authorized-domain.example/ \\
+  --authorized --verify-cors --out cors_verification
+```
+
+Review the `paired_cors_verification` entries in the JSON report. A positive
+result only establishes reflected response headers for the two observations;
+actual sensitive data exposure, authentication and browser behavior require
+separately authorized validation using owner-controlled test resources.
+
 ## Website testing quick start
 
 The live auditor is already implemented in `decrypto_assumption_scan.py`. Run it locally
