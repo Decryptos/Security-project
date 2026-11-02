@@ -3,7 +3,7 @@ import sys
 import unittest
 from pathlib import Path
 
-MODULE_PATH = Path(__file__).resolve().with_name("decrypto_assumption_scan.py")
+MODULE_PATH = Path(__file__).resolve().parent.parent / "decrypto_assumption_scan.py"
 SPEC = importlib.util.spec_from_file_location("decrypto_assumption_scan", MODULE_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
