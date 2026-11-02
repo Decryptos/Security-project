@@ -105,16 +105,22 @@ def scan_repo_for_crypto_issues(root: Path, languages: list[str] | None = None) 
     findings: list[dict[str, Any]] = []
     inspected = 0
 
+    root = root.resolve(strict=True)
+    excluded_dirs = {".git", ".venv", "venv", "node_modules", "__pycache__"}
     for path in root.rglob("*"):
-        if not path.is_file():
+        if excluded_dirs.intersection(path.relative_to(root).parts):
+            continue
+        if path.is_symlink() or not path.is_file():
             continue
         lang = _file_language(path)
         if lang is None or lang not in languages:
             continue
-        # Skip large binary files; the scanner is intentionally heuristic-based.
+        # Bound memory use and skip links outside the selected root.
         try:
+            if path.stat().st_size > 1_048_576:
+                continue
             text = path.read_text(encoding="utf-8")
-        except Exception:
+        except (OSError, UnicodeError):
             continue
         inspected += 1
         findings.extend(_scan_text(path, root, text))
