@@ -107,3 +107,11 @@ def test_cookie_metadata_session_like_detection():
     assert result[0]["session_like"] is True
     assert result[0]["secure"] is True
     assert result[0]["httponly"] is True
+
+
+def load_tests(loader, tests, pattern):
+    """Include standalone function controls in the stdlib CI test suite."""
+    import unittest
+    tests.addTests(unittest.FunctionTestCase(value) for name, value in globals().items()
+                   if name.startswith("test_") and callable(value))
+    return tests

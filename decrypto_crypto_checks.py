@@ -14,6 +14,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from decrypto_nonce_checks import check_python_aead_nonces
+
 # Reuse the new_finding factory shape from the main scanner by reconstructing a
 # compatible minimal function here. The main module will merge findings.
 
@@ -80,9 +82,15 @@ def _scan_text(path: Path, root: Path, text: str) -> list[dict[str, Any]]:
             evidence = {
                 "file": relative_path,
                 "line": text.count("\n", 0, m.start()) + 1,
+                "column": m.start() - text.rfind("\n", 0, m.start()),
                 "match_excerpt": _match_excerpt(text, m.start(), m.end()),
             }
-            findings.append(_make_finding(rule, f'{evidence["file"]}:{evidence["line"]}', title, evidence))
+            findings.append(_make_finding(
+                rule,
+                f'{evidence["file"]}:{evidence["line"]}:{evidence["column"]}',
+                title,
+                evidence,
+            ))
     return findings
 
 
@@ -105,19 +113,27 @@ def scan_repo_for_crypto_issues(root: Path, languages: list[str] | None = None) 
     findings: list[dict[str, Any]] = []
     inspected = 0
 
+    root = root.resolve(strict=True)
+    excluded_dirs = {".git", ".venv", "venv", "node_modules", "__pycache__"}
     for path in root.rglob("*"):
-        if not path.is_file():
+        if excluded_dirs.intersection(path.relative_to(root).parts):
+            continue
+        if path.is_symlink() or not path.is_file():
             continue
         lang = _file_language(path)
         if lang is None or lang not in languages:
             continue
-        # Skip large binary files; the scanner is intentionally heuristic-based.
+        # Bound memory use and skip links outside the selected root.
         try:
+            if path.stat().st_size > 1_048_576:
+                continue
             text = path.read_text(encoding="utf-8")
-        except Exception:
+        except (OSError, UnicodeError):
             continue
         inspected += 1
         findings.extend(_scan_text(path, root, text))
+        if lang == "python":
+            findings.extend(check_python_aead_nonces(text, str(path.relative_to(root))))
 
     meta = {"files_inspected": inspected, "languages": languages, "finding_count": len(findings)}
     return {"findings": findings, "meta": meta}
