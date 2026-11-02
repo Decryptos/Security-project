@@ -44,3 +44,11 @@ def test_scan_detects_weak_hash():
         p.write_text("import hashlib\nh = hashlib.md5(b'data')")
         res = scan_repo_for_crypto_issues(Path(d))
         assert any(f["rule"] == "CRYPTO-WEAK-HASH" for f in res["findings"])
+
+
+def load_tests(loader, tests, pattern):
+    """Include standalone function controls in the stdlib CI test suite."""
+    import unittest
+    tests.addTests(unittest.FunctionTestCase(value) for name, value in globals().items()
+                   if name.startswith("test_") and callable(value))
+    return tests
