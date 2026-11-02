@@ -43,6 +43,6 @@ def metadata(origin: str, status: int, headers: Any) -> dict[str, Any]:
     return {
         "origin": origin,
         "status": status,
-        "allow_origin": (headers.get("Access-Control-Allow-Origin") or "").strip(),
-        "allow_credentials": (headers.get("Access-Control-Allow-Credentials") or "").strip().lower(),
+        "allow_origin": ((headers.get("Access-Control-Allow-Origin") or "").strip() if len(headers.get_all("Access-Control-Allow-Origin", [])) == 1 else ""),
+        "allow_credentials": ((headers.get("Access-Control-Allow-Credentials") or "").strip() if len(headers.get_all("Access-Control-Allow-Credentials", [])) == 1 else ""),
     }

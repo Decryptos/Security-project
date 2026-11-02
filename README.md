@@ -209,3 +209,33 @@ License
 
 Provided as-is for authorized security review and responsible disclosure
 workflows.
+
+
+### Decrypto 1.3 policy leads and synthetic validation
+
+The authorized read-only scanner now reviews invalid/disabled HSTS max-age,
+SameSite values and None/Secure combinations, and __Host-/__Secure- cookie
+requirements. Cookie names and values remain in memory only. Prefix failures
+may mean a browser rejects a cookie, rather than exposing a session.
+
+Shared-cache checks use exact directive names across repeated fields and suppress
+leads for private, no-store, no-cache, or zero s-maxage policies. An explicitly
+owner-declared private endpoint can produce a cache lead without setting a cookie.
+CORS checks respect case-sensitive credential permission, reject duplicate
+allow-origin/credentials fields, and respect repeated Vary fields and Vary: *.
+Cache evidence is boolean metadata, never raw Cache-Control values.
+
+Offline OpenAPI review recognizes inherited security and anonymous alternatives
+(`security: []` or an empty requirement object in an OR list). Intentionally public
+writes still need owner review. Unresolved operation/path references are skipped;
+external references are never fetched. Malformed contract structures fail before
+any HTTP requests. This is a targeted review, not full OpenAPI schema validation.
+
+Reproduce the synthetic controls with `python -m unittest discover -s tests -v`.
+The tests cover positive/negative policy pairs, redaction, invalid input and the
+loopback-only CLI fixture. Existing standalone test functions are included in
+unittest discovery. No real website, credential, or customer data is needed.
+Leads remain unconfirmed; inherited HSTS, browser cookie rules, intended public
+operations and actual cache/CDN behavior require owner validation. Missing
+headers and contract declarations do not prove exploitable impact. Keep generated
+reports confidential and share only through the owner's approved disclosure channel.
