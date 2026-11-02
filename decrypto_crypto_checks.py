@@ -46,10 +46,10 @@ _PATTERNS = [
     (re.compile(r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----"), "CRYPTO-PEM-IN-CODE", "Private key PEM embedded in repository"),
 
     # Weak hashes
-    (re.compile(r"\b(md5|sha1|md4)\b"), "CRYPTO-WEAK-HASH", "Use of deprecated or weak hash algorithm"),
+    (re.compile(r"(?i)\b(md5|sha-?1|md4)\b"), "CRYPTO-WEAK-HASH", "Use of deprecated or weak hash algorithm"),
 
     # Insecure ciphers/modes
-    (re.compile(r"\b(aes-?ecb|des|rc4|3des|tripledes)\b"), "CRYPTO-WEAK-CIPHER", "Use of weak cipher or insecure mode (ECB/RC4/DES)"),
+    (re.compile(r"(?i)\b(aes-?ecb|des|rc4|3des|tripledes)\b"), "CRYPTO-WEAK-CIPHER", "Use of weak cipher or insecure mode (ECB/RC4/DES)"),
 
     # Insecure RNG usage in Python or JS
     (re.compile(r"\brandom\.random\(|\brandom\.seed\(|\bMath\.random\(|\bseedrandom\b"), "CRYPTO-INSECURE-RNG", "Use of non-cryptographic RNG or explicit seeding"),
@@ -82,7 +82,7 @@ def _scan_text(path: Path, root: Path, text: str) -> list[dict[str, Any]]:
                 "line": text.count("\n", 0, m.start()) + 1,
                 "match_excerpt": _match_excerpt(text, m.start(), m.end()),
             }
-            findings.append(_make_finding(rule, evidence["file"], title, evidence))
+            findings.append(_make_finding(rule, f'{evidence["file"]}:{evidence["line"]}', title, evidence))
     return findings
 
 
