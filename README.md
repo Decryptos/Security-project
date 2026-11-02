@@ -60,6 +60,41 @@ trusted patterns instead of insecure JavaScript equivalents:
 - `hmac.compare_digest()` for constant-time comparison
 - Explicit hashing/HMAC examples that avoid unsafe defaults
 
+## Website testing quick start
+
+The live auditor is already implemented in `decrypto_assumption_scan.py`. Run it locally
+against HTTPS endpoints **you own or are explicitly authorized to assess**. The
+`--authorized` flag affirms permission; it does not grant permission.
+
+```bash
+python3 decrypto_assumption_scan.py \
+  --url https://your-authorized-domain.example/ \
+  --authorized --cors --out site_audit
+```
+
+Read the results in `site_audit.json` and `site_audit.md`. Add explicit
+`--url` flags (up to 12) for additional in-scope endpoints, and use
+`--private-url` for a URL declared private by its owner. The tool does
+not crawl a whole domain or test arbitrary URLs automatically.
+
+The scanner sends a HEAD request per public URL and optionally an additional
+GET with a harmless Origin header for `--cors`. A declared private URL uses
+an anonymous GET instead of HEAD. It never follows redirects or stores response
+bodies. HTTPS is required for non-loopback targets; query strings and embedded
+credentials are rejected. The command limits requests and adds delays.
+
+**Offline website test, without touching an external service:**
+
+```bash
+python3 -m unittest tests.test_website_cli -v
+```
+
+This starts a temporary HTTP server on 127.0.0.1, exercises the real CLI,
+checks that JSON/Markdown results are created and redacted, and confirms
+authorization is required. Static cryptographic checks, including nonce
+hypotheses, require access to source files; they are not inferred from HTTP
+response headers.
+
 Live HTTP/OpenAPI checks (assumption-driven)
 
 - HSTS missing on HTTPS endpoints
