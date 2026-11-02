@@ -14,6 +14,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from decrypto_nonce_checks import check_python_aead_nonces
+
 # Reuse the new_finding factory shape from the main scanner by reconstructing a
 # compatible minimal function here. The main module will merge findings.
 
@@ -124,6 +126,8 @@ def scan_repo_for_crypto_issues(root: Path, languages: list[str] | None = None) 
             continue
         inspected += 1
         findings.extend(_scan_text(path, root, text))
+        if lang == "python":
+            findings.extend(check_python_aead_nonces(text, str(path.relative_to(root))))
 
     meta = {"files_inspected": inspected, "languages": languages, "finding_count": len(findings)}
     return {"findings": findings, "meta": meta}
