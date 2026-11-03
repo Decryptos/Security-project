@@ -74,6 +74,43 @@ class TestWebsiteCLI(unittest.TestCase):
             self.assertNotEqual(run.returncode, 0)
             self.assertFalse((Path(tmp) / "report.json").exists())
 
+    def test_domain_requires_authorization_without_any_network_call(self):
+        # --authorized is validated before any discovery network call is made,
+        # so this must fail fast even though "example.test" is never reachable.
+        with tempfile.TemporaryDirectory() as tmp:
+            run = subprocess.run(
+                [sys.executable, str(SCANNER), "--domain", "example.test",
+                 "--out", str(Path(tmp) / "report")],
+                check=False, capture_output=True, text=True, timeout=10,
+            )
+            self.assertNotEqual(run.returncode, 0)
+            self.assertIn("--authorized", run.stderr)
+            self.assertFalse((Path(tmp) / "report.json").exists())
+
+    def test_max_subdomains_out_of_range_rejected_before_network_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = subprocess.run(
+                [sys.executable, str(SCANNER), "--domain", "example.test", "--authorized",
+                 "--max-subdomains", "101", "--out", str(Path(tmp) / "report")],
+                check=False, capture_output=True, text=True, timeout=10,
+            )
+            self.assertNotEqual(run.returncode, 0)
+            self.assertIn("--max-subdomains", run.stderr)
+
+    def test_exclude_subdomain_and_domain_minimal_checks_flags_are_recognized(self):
+        # No --domain/--url/--openapi given, so argparse reaches the "provide a
+        # target" error — proves both flags parse without "unrecognized
+        # arguments" rather than exercising live discovery.
+        with tempfile.TemporaryDirectory() as tmp:
+            run = subprocess.run(
+                [sys.executable, str(SCANNER), "--exclude-subdomain", "dev-*.example.test",
+                 "--domain-minimal-checks", "--out", str(Path(tmp) / "report")],
+                check=False, capture_output=True, text=True, timeout=10,
+            )
+            self.assertNotEqual(run.returncode, 0)
+            self.assertNotIn("unrecognized arguments", run.stderr)
+            self.assertIn("Provide --url, --domain, or --openapi", run.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

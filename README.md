@@ -133,15 +133,29 @@ Live HTTP/OpenAPI checks (assumption-driven)
   URL. Confirmed findings still keep `status: UNCONFIRMED` but set
   `exploitability.directly_verifiable: true` with the specific evidence (timing delta, error
   signature, marker reflection, or file signature).
-- `--domain example.com`: passively finds
-  subdomains (crt.sh certificate-transparency logs + DNS resolution, via
-  `decrypto_subdomain_scan.py`) and adds up to `--max-subdomains` (default 5, max 15) to the
-  scan. Requires `--authorized`; the discovery step never contacts the subdomains itself.
+- `--domain example.com` (requires `--authorized` from the domain owner): enumerates
+  **every** live subdomain — not a sample — by combining crt.sh certificate-transparency
+  logs with DNS resolution (`decrypto_subdomain_scan.py`), then adds them all to the scan.
+  `--max-subdomains` defaults to, and caps at, 100 (effectively "all" discovered+live
+  subdomains for the vast majority of domains); use `--exclude-subdomain HOST` (exact
+  hostname or `fnmatch` glob, e.g. `dev-*.example.com`, repeatable) to keep specific
+  hosts out of scope. A `--domain` run also auto-enables `--cors`, `--check-redirects`,
+  `--check-sensitive-paths` and `--check-tls` on every discovered host (pass
+  `--domain-minimal-checks` to opt out and run only the always-on baseline checks).
+  `--enable-active-payloads` stays a separate, explicit opt-in even for domain-wide
+  sweeps. The request budget scales with scope: up to 6,000 requests for `--domain` runs
+  vs. 250 for `--url`-only runs; discovery itself never contacts the candidate subdomains,
+  only DNS and crt.sh. Reports include a "Domain-wide subdomain scope" section showing
+  candidates found, exclusions, and anything truncated by the safety ceiling.
 - Private-endpoint assumptions (gated by observable auth signals such as WWW-Authenticate or session-like Set-Cookie)
 - Offline OpenAPI contract inspection (API key-in-URL, mutating operations without documented security requirements)
 
 Bug-class taxonomy: every finding carries a `taxonomy` object (category, subtype, CWE,
-OWASP Top 10 2021) from `decrypto_taxonomy.py`, and reports include `findings_by_category`.
+OWASP Top 10 2021 **and** OWASP Top 10:2025 code) from `decrypto_taxonomy.py`, and reports
+include `findings_by_category` plus `findings_by_owasp_top10_2025`. OWASP Top 10:2025
+(finalized January 2026) is the current, 8th edition; OWASP has **not** published a separate
+"2026" list — per its ~4-year cadence (2017, 2021, 2025) the next revision is not expected
+until roughly 2028–2029, so Top 10:2025 is the correct reference for both 2025 and 2026.
 Variants covered include CSP weaknesses (missing, `unsafe-inline`, `unsafe-eval`, wildcard
 sources, missing `object-src`/`base-uri`), Referrer-Policy and Permissions-Policy gaps,
 framework version headers, CORS wildcard, twelve sensitive-path kinds (version control,
@@ -283,3 +297,31 @@ Leads remain unconfirmed; inherited HSTS, browser cookie rules, intended public
 operations and actual cache/CDN behavior require owner validation. Missing
 headers and contract declarations do not prove exploitable impact. Keep generated
 reports confidential and share only through the owner's approved disclosure channel.
+
+### Decrypto 1.4 domain-wide enumeration and OWASP Top 10:2025
+
+`--domain` now enumerates every live subdomain it can discover (crt.sh +
+DNS), not a small sample: `--max-subdomains` defaults to, and is capped at,
+100. `--exclude-subdomain HOST` (exact hostname or glob, repeatable) removes
+specific hosts from scope, and a `--domain` run automatically turns on
+`--cors`, `--check-redirects`, `--check-sensitive-paths` and `--check-tls`
+for every discovered host unless `--domain-minimal-checks` is passed.
+`--enable-active-payloads` remains a separate, explicit opt-in regardless of
+scope size. The per-run request budget scales to 6,000 for `--domain` scans
+(vs. 250 for `--url`-only runs) to accommodate fanning out across many
+authorized hosts; `discover_authorized_subdomains_report()` in
+`decrypto_subdomain_scan.py` exposes discovery/exclusion metadata (candidates
+found, excluded-by-pattern, live-and-in-scope, truncation), surfaced in the
+JSON result's `domain_scope` field and a "Domain-wide subdomain scope"
+section in the Markdown report.
+
+Findings now also carry an `owasp_top10_2025` taxonomy code alongside the
+existing 2021 code, and results include a `findings_by_owasp_top10_2025`
+summary. OWASP Top 10:2025 (finalized January 2026) is the current, 8th
+edition; there is no separate "2026" list, so it is the correct reference
+for both years. The mapping from 2021 to 2025 codes lives in
+`OWASP_2021_TO_2025` in `decrypto_taxonomy.py`.
+
+All of this still assumes explicit authorization: `--domain` requires
+`--authorized` and permission from the domain owner, exactly like `--url`.
+

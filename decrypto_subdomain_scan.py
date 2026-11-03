@@ -17,6 +17,7 @@ hosts.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 import socket
@@ -27,9 +28,32 @@ from urllib.request import Request, urlopen
 CRTSH_URL_TEMPLATE = "https://crt.sh/?q=%25.{domain}&output=json"
 _HOSTNAME_RE = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))*$", re.I)
 
+# Hard safety ceiling for subdomains returned from one discovery call. Passed
+# as the default `max_subdomains` so a plain `--domain` run automatically
+# covers every discovered, live subdomain up to this bound — in practice
+# "all of them" for the vast majority of domains, while still preventing an
+# unbounded sweep against domains with very large certificate-transparency
+# histories.
+MAX_SUBDOMAINS_CEILING = 100
+
 
 def _valid_hostname(name: str) -> bool:
     return bool(name) and len(name) <= 253 and bool(_HOSTNAME_RE.match(name))
+
+
+def normalize_exclusions(patterns) -> frozenset[str]:
+    """Lowercase and strip a collection of exact hostnames or glob patterns."""
+    return frozenset(p.strip().lower().rstrip(".") for p in (patterns or ()) if p and p.strip())
+
+
+def is_excluded(hostname: str, exclude_patterns: frozenset[str]) -> bool:
+    """Return True if `hostname` exactly matches, or glob-matches, any exclusion pattern.
+
+    Patterns use shell-style wildcards (`fnmatch`), e.g. "internal.example.com"
+    (exact) or "dev-*.example.com" / "*.staging.example.com" (glob).
+    """
+    hostname = hostname.lower()
+    return any(fnmatch.fnmatch(hostname, pattern) for pattern in exclude_patterns)
 
 
 def discover_subdomains_crtsh(domain: str, *, timeout: float = 8.0) -> set[str]:
@@ -90,28 +114,64 @@ def resolve_live_hosts(hostnames: set[str], *, timeout: float = 3.0, max_hosts: 
     return live
 
 
-def discover_authorized_subdomains(domain: str, *, scheme: str = "https", max_subdomains: int = 10,
-                                    lookup_timeout: float = 8.0, resolve_timeout: float = 3.0) -> list[str]:
+def discover_authorized_subdomains(domain: str, *, scheme: str = "https", max_subdomains: int = MAX_SUBDOMAINS_CEILING,
+                                    exclude=None, lookup_timeout: float = 8.0, resolve_timeout: float = 3.0) -> list[str]:
     """Return up to `max_subdomains` authorized-domain URLs discovered passively.
 
     Combines crt.sh discovery with DNS liveness filtering. The apex domain is
-    always included first if live. Intended to feed decrypto_assumption_scan.py,
-    which enforces its own `--authorized`, request-count, and rate limits before
-    any discovered host is actually contacted.
+    always included first if live. `max_subdomains` defaults to
+    `MAX_SUBDOMAINS_CEILING`, so a plain call automatically covers every
+    discovered, live subdomain up to that safety ceiling (in practice "all of
+    them" for most domains). `exclude` is an optional iterable of exact
+    hostnames or `fnmatch`-style glob patterns (e.g. "dev-*.example.com")
+    skipped before DNS resolution. Intended to feed
+    decrypto_assumption_scan.py, which enforces its own `--authorized`,
+    request-count, and rate limits before any discovered host is actually
+    contacted.
     """
-    if max_subdomains < 1 or max_subdomains > 20:
-        raise ValueError("max_subdomains must be between 1 and 20")
+    report = discover_authorized_subdomains_report(
+        domain, scheme=scheme, max_subdomains=max_subdomains, exclude=exclude,
+        lookup_timeout=lookup_timeout, resolve_timeout=resolve_timeout,
+    )
+    return report["selected"]
+
+
+def discover_authorized_subdomains_report(domain: str, *, scheme: str = "https",
+                                           max_subdomains: int = MAX_SUBDOMAINS_CEILING,
+                                           exclude=None, lookup_timeout: float = 8.0,
+                                           resolve_timeout: float = 3.0) -> dict:
+    """Like `discover_authorized_subdomains`, but also reports discovery/exclusion metadata.
+
+    Useful for disclosure reports that should show *why* a candidate is
+    absent (excluded by pattern, not live, or truncated by the safety
+    ceiling) rather than silently omitting it.
+    """
+    if max_subdomains < 1 or max_subdomains > MAX_SUBDOMAINS_CEILING:
+        raise ValueError(f"max_subdomains must be between 1 and {MAX_SUBDOMAINS_CEILING}")
     if scheme not in ("http", "https"):
         raise ValueError("scheme must be http or https")
 
     domain = domain.strip().lower().rstrip(".")
+    exclude_patterns = normalize_exclusions(exclude)
     candidates = discover_subdomains_crtsh(domain, timeout=lookup_timeout)
     candidates.add(domain)
-    live = resolve_live_hosts(candidates, timeout=resolve_timeout, max_hosts=max(max_subdomains * 4, 20))
+    excluded = {h for h in candidates if is_excluded(h, exclude_patterns)} if exclude_patterns else set()
+    in_scope = candidates - excluded
+
+    resolve_cap = min(max(max_subdomains * 4, 20), 300)
+    live = resolve_live_hosts(in_scope, timeout=resolve_timeout, max_hosts=resolve_cap)
 
     ordered = [domain] if domain in live else []
     ordered += sorted(h for h in live if h != domain)
-    return [f"{scheme}://{h}/" for h in ordered[:max_subdomains]]
+    selected = ordered[:max_subdomains]
+    return {
+        "domain": domain,
+        "candidates_found": len(candidates),
+        "excluded_by_pattern": sorted(excluded),
+        "live_and_in_scope": len(live),
+        "selected": [f"{scheme}://{h}/" for h in selected],
+        "truncated_by_ceiling": len(ordered) > len(selected),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -121,12 +181,17 @@ def main(argv: list[str] | None = None) -> int:
         description="Decrypto passive subdomain discovery (crt.sh + DNS) — authorized domains only"
     )
     parser.add_argument("domain", help="Apex domain you are authorized to test")
-    parser.add_argument("--max-subdomains", type=int, default=10, help="Cap on discovered subdomains (1-20)")
+    parser.add_argument("--max-subdomains", type=int, default=MAX_SUBDOMAINS_CEILING,
+                         help=f"Cap on discovered subdomains (1-{MAX_SUBDOMAINS_CEILING}, "
+                              f"default {MAX_SUBDOMAINS_CEILING} = effectively all discovered+live subdomains)")
+    parser.add_argument("--exclude", action="append", default=[],
+                         help="Exact hostname or glob pattern (e.g. 'dev-*.example.com') to exclude; repeatable")
     parser.add_argument("--scheme", choices=("http", "https"), default="https")
     args = parser.parse_args(argv)
 
     try:
-        urls = discover_authorized_subdomains(args.domain, scheme=args.scheme, max_subdomains=args.max_subdomains)
+        urls = discover_authorized_subdomains(args.domain, scheme=args.scheme, max_subdomains=args.max_subdomains,
+                                               exclude=args.exclude)
     except (ValueError, RuntimeError) as exc:
         parser.error(str(exc))
         return 2

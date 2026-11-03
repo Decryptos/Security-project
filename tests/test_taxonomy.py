@@ -10,7 +10,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import decrypto_assumption_scan as scan_mod
 from decrypto_crypto_checks import scan_repo_for_crypto_issues
-from decrypto_taxonomy import TAXONOMY, classify, summarize
+from decrypto_taxonomy import (
+    OWASP_2021_TO_2025,
+    TAXONOMY,
+    classify,
+    summarize,
+    summarize_by_owasp,
+)
 
 
 def _headers(**values):
@@ -32,6 +38,35 @@ class TestTaxonomy(unittest.TestCase):
     def test_summarize_groups_by_category_and_subtype(self):
         findings = [scan_mod.new_finding("OPEN-REDIRECT", "u", "t", "a", {}, "r", "f", "v")] * 2
         self.assertEqual(summarize(findings), {"redirect": {"unvalidated-redirect-parameter": 2}})
+
+
+class TestOwasp2025Mapping(unittest.TestCase):
+    def test_every_taxonomy_2021_code_has_a_2025_mapping(self):
+        codes = {entry[3] for entry in TAXONOMY.values() if entry[3]}
+        self.assertTrue(codes)
+        for code in codes:
+            self.assertIn(code, OWASP_2021_TO_2025)
+            self.assertTrue(OWASP_2021_TO_2025[code])
+
+    def test_classify_reports_both_owasp_editions(self):
+        tax = classify("OPEN-REDIRECT")
+        self.assertEqual(tax["owasp_top10_2021"], "A01")
+        self.assertEqual(tax["owasp_top10_2025"], "A01:2025")
+        tax = classify("CORS-WILDCARD")
+        self.assertEqual(tax["owasp_top10_2021"], "A05")
+        self.assertEqual(tax["owasp_top10_2025"], "A02:2025")
+
+    def test_unknown_rule_has_empty_owasp_codes(self):
+        tax = classify("NOPE-RULE")
+        self.assertEqual(tax["owasp_top10_2021"], "")
+        self.assertEqual(tax["owasp_top10_2025"], "")
+
+    def test_summarize_by_owasp_counts_current_edition(self):
+        findings = (
+            [scan_mod.new_finding("OPEN-REDIRECT", "u", "t", "a", {}, "r", "f", "v")] * 2
+            + [scan_mod.new_finding("CORS-WILDCARD", "u", "t", "a", {}, "r", "f", "v")]
+        )
+        self.assertEqual(summarize_by_owasp(findings), {"A01:2025": 2, "A02:2025": 1})
 
 
 class TestHeaderVariants(unittest.TestCase):

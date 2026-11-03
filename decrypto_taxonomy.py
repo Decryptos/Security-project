@@ -1,13 +1,39 @@
 """Bug-class taxonomy for Decrypto findings.
 
-Maps every rule ID to a category, a subtype, a CWE and an OWASP Top 10 (2021)
-bucket so reports can be grouped and filtered by bug class and variant.
-Unknown rules fall back to "uncategorized" rather than being dropped.
+Maps every rule ID to a category, a subtype, a CWE, an OWASP Top 10 2021
+bucket and the current OWASP Top 10:2025 bucket, so reports can be grouped
+and filtered by bug class, variant and OWASP category. Unknown rules fall
+back to "uncategorized" rather than being dropped.
+
+Note on "2025 vs 2026": OWASP Top 10:2025 (released November 2025, finalized
+January 2026) is the current, 8th edition. OWASP has not published a separate
+2026 edition — per its historical ~4-year cadence (2017, 2021, 2025), the
+next revision is not expected until roughly 2028-2029. Top 10:2025 is
+therefore the correct, applicable reference for both 2025 and 2026.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+# OWASP Top 10:2021 code -> OWASP Top 10:2025 code, per the official changes:
+# Security Misconfiguration jumped from #5 to #2; Vulnerable/Outdated
+# Components was broadened into the new "Software Supply Chain Failures";
+# Server-Side Request Forgery (2021 A10, a standalone category) was folded
+# into Broken Access Control; "Insecure Design" and the others shifted rank
+# but kept their meaning.
+OWASP_2021_TO_2025: dict[str, str] = {
+    "A01": "A01:2025",  # Broken Access Control (unchanged; now also covers SSRF)
+    "A02": "A04:2025",  # Cryptographic Failures
+    "A03": "A05:2025",  # Injection
+    "A04": "A06:2025",  # Insecure Design
+    "A05": "A02:2025",  # Security Misconfiguration
+    "A06": "A03:2025",  # Vulnerable/Outdated Components -> Software Supply Chain Failures
+    "A07": "A07:2025",  # Authentication Failures (was "Identification and Authentication Failures")
+    "A08": "A08:2025",  # Software or Data Integrity Failures
+    "A09": "A09:2025",  # Security Logging and Alerting Failures
+    "A10": "A01:2025",  # SSRF retired as standalone; absorbed into Broken Access Control
+}
 
 # rule prefix -> (category, subtype, CWE, OWASP 2021)
 TAXONOMY: dict[str, tuple[str, str, str, str]] = {
@@ -82,8 +108,14 @@ def classify(rule: str) -> dict[str, str]:
         candidate = candidate.rsplit("-", 1)[0]
     else:
         entry = _UNKNOWN
-    category, subtype, cwe, owasp = entry
-    return {"category": category, "subtype": subtype, "cwe": cwe, "owasp_top10_2021": owasp}
+    category, subtype, cwe, owasp_2021 = entry
+    return {
+        "category": category,
+        "subtype": subtype,
+        "cwe": cwe,
+        "owasp_top10_2021": owasp_2021,
+        "owasp_top10_2025": OWASP_2021_TO_2025.get(owasp_2021, ""),
+    }
 
 
 def summarize(findings: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
@@ -94,3 +126,14 @@ def summarize(findings: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
         bucket = summary.setdefault(tax["category"], {})
         bucket[tax["subtype"]] = bucket.get(tax["subtype"], 0) + 1
     return {cat: dict(sorted(sub.items())) for cat, sub in sorted(summary.items())}
+
+
+def summarize_by_owasp(findings: list[dict[str, Any]]) -> dict[str, int]:
+    """Count findings per OWASP Top 10:2025 category code (current standard; see module docstring)."""
+    counts: dict[str, int] = {}
+    for finding in findings:
+        tax = finding.get("taxonomy") or classify(finding.get("rule", ""))
+        code = tax.get("owasp_top10_2025") or "uncategorized"
+        counts[code] = counts.get(code, 0) + 1
+    return dict(sorted(counts.items()))
+

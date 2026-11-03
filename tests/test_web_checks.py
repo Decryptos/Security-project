@@ -60,6 +60,31 @@ class TestLiveChecks(unittest.TestCase):
         self.assertTrue(all(f["status"].startswith("UNCONFIRMED") for f in result["findings"]))
         self.assertIn("Exploitability verification", scan_mod.markdown_report(result))
 
+    def test_domain_scope_flows_into_result_and_report(self):
+        domain_scope = {
+            "domain": "example.test",
+            "candidates_found": 5,
+            "excluded_by_pattern": ["internal.example.test"],
+            "live_and_in_scope": 3,
+            "selected": [self.url],
+            "truncated_by_ceiling": False,
+        }
+        result = scan_mod.scan([self.url], set(), delay=0.5, timeout=3, check_redirects=True, domain_scope=domain_scope)
+        self.assertEqual(result["domain_scope"], domain_scope)
+        self.assertIn("A01:2025", result["findings_by_owasp_top10_2025"])
+        report = scan_mod.markdown_report(result)
+        self.assertIn("## Domain-wide subdomain scope", report)
+        self.assertIn("`example.test`", report)
+        self.assertIn("Excluded by `--exclude-subdomain` pattern:** internal.example.test", report)
+        self.assertIn("## Findings by OWASP Top 10:2025 category", report)
+        self.assertIn("has not published a separate 2026 edition", report)
+        self.assertIn("**OWASP 2025:** A01:2025", report)
+
+    def test_no_domain_scope_omits_domain_section(self):
+        result = scan_mod.scan([self.url], set(), delay=0.5, timeout=3)
+        self.assertIsNone(result["domain_scope"])
+        self.assertNotIn("## Domain-wide subdomain scope", scan_mod.markdown_report(result))
+
 
 class TestSecurityHeaders(unittest.TestCase):
     def test_hardened_response_has_no_findings(self):
@@ -107,6 +132,64 @@ class TestSubdomains(unittest.TestCase):
                 mock.patch.object(sub_mod, "resolve_live_hosts", return_value=live):
             urls = sub_mod.discover_authorized_subdomains("example.com", max_subdomains=2)
         self.assertEqual(urls, ["https://example.com/", "https://a.example.com/"])
+
+    def test_discover_default_covers_every_live_subdomain(self):
+        live = {"example.com": ["1.1.1.1"], "a.example.com": ["1.1.1.2"], "b.example.com": ["1.1.1.3"]}
+        with mock.patch.object(sub_mod, "discover_subdomains_crtsh", return_value={"b.example.com", "a.example.com"}), \
+                mock.patch.object(sub_mod, "resolve_live_hosts", return_value=live):
+            urls = sub_mod.discover_authorized_subdomains("example.com")
+        self.assertEqual(sorted(urls), ["https://a.example.com/", "https://b.example.com/", "https://example.com/"])
+
+    def test_normalize_exclusions_lowercases_and_strips(self):
+        self.assertEqual(
+            sub_mod.normalize_exclusions([" Dev-A.Example.com ", "", None, "b.example.com."]),
+            frozenset({"dev-a.example.com", "b.example.com"}),
+        )
+        self.assertEqual(sub_mod.normalize_exclusions(None), frozenset())
+
+    def test_is_excluded_matches_exact_and_glob(self):
+        patterns = sub_mod.normalize_exclusions(["internal.example.com", "dev-*.example.com"])
+        self.assertTrue(sub_mod.is_excluded("internal.example.com", patterns))
+        self.assertTrue(sub_mod.is_excluded("dev-staging.example.com", patterns))
+        self.assertTrue(sub_mod.is_excluded("DEV-STAGING.example.com", patterns))
+        self.assertFalse(sub_mod.is_excluded("a.example.com", patterns))
+
+    def test_discover_excludes_matching_hostnames(self):
+        live = {"example.com": ["1.1.1.1"], "a.example.com": ["1.1.1.2"], "dev-x.example.com": ["1.1.1.3"]}
+
+        def resolve_only_requested(hostnames, **_kwargs):
+            return {h: live[h] for h in hostnames if h in live}
+
+        with mock.patch.object(sub_mod, "discover_subdomains_crtsh",
+                                return_value={"a.example.com", "dev-x.example.com"}), \
+                mock.patch.object(sub_mod, "resolve_live_hosts", side_effect=resolve_only_requested):
+            urls = sub_mod.discover_authorized_subdomains("example.com", exclude=["dev-*.example.com"])
+        self.assertEqual(sorted(urls), ["https://a.example.com/", "https://example.com/"])
+
+    def test_report_includes_discovery_and_exclusion_metadata(self):
+        live = {"example.com": ["1.1.1.1"], "a.example.com": ["1.1.1.2"]}
+
+        def resolve_only_requested(hostnames, **_kwargs):
+            return {h: live[h] for h in hostnames if h in live}
+
+        with mock.patch.object(sub_mod, "discover_subdomains_crtsh",
+                                return_value={"a.example.com", "dev-x.example.com"}), \
+                mock.patch.object(sub_mod, "resolve_live_hosts", side_effect=resolve_only_requested):
+            report = sub_mod.discover_authorized_subdomains_report(
+                "example.com", exclude=["dev-*.example.com"], max_subdomains=1,
+            )
+        self.assertEqual(report["domain"], "example.com")
+        self.assertEqual(report["candidates_found"], 3)  # a, dev-x, + apex
+        self.assertEqual(report["excluded_by_pattern"], ["dev-x.example.com"])
+        self.assertEqual(report["live_and_in_scope"], 2)
+        self.assertEqual(report["selected"], ["https://example.com/"])
+        self.assertTrue(report["truncated_by_ceiling"])
+
+    def test_max_subdomains_out_of_range_rejected(self):
+        with self.assertRaises(ValueError):
+            sub_mod.discover_authorized_subdomains("example.com", max_subdomains=0)
+        with self.assertRaises(ValueError):
+            sub_mod.discover_authorized_subdomains("example.com", max_subdomains=sub_mod.MAX_SUBDOMAINS_CEILING + 1)
 
 
 if __name__ == "__main__":

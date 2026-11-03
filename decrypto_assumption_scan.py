@@ -25,10 +25,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPHandler, HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from decrypto_active_checks import MAX_INJECTION_POINTS, MAX_PAYLOAD_REQUESTS_PER_POINT, active_payload_checks
-from decrypto_taxonomy import classify, summarize
+from decrypto_subdomain_scan import MAX_SUBDOMAINS_CEILING
+from decrypto_taxonomy import classify, summarize, summarize_by_owasp
 from decrypto_validation import ORIGINS, evaluate_cors_pair, metadata
 
-VERSION = "1.3"
+VERSION = "1.4"
 MARKER_ORIGIN = "https://audit-origin.invalid"
 REDIRECT_MARKER = "https://audit-redirect.invalid/"
 REDIRECT_PARAMS = ("redirect", "return", "next")
@@ -49,6 +50,11 @@ SENSITIVE_PATH_KINDS = {
 SENSITIVE_PATHS = tuple(SENSITIVE_PATH_KINDS)
 SESSION_NAME = re.compile(r"(?:session|sessid|(^|[_-])sid($|[_-])|auth|token|jwt|login)", re.I)
 METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
+# Safety ceilings on total HTTP requests sent in one CLI run. A --domain sweep
+# needs a much larger budget because it intentionally fans out to many
+# authorized hosts at once; --url-only runs keep the original, tighter cap.
+MAX_REQUESTS_PER_RUN = 250
+MAX_REQUESTS_PER_DOMAIN_RUN = 6000
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -747,7 +753,7 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
          verify_cors: bool = False, check_redirects: bool = False,
          check_sensitive_paths: bool = False, check_tls: bool = False,
          enable_active_payloads: bool = False, max_injection_points: int = MAX_INJECTION_POINTS,
-         max_urls: int = 12) -> dict[str, Any]:
+         max_urls: int = 12, domain_scope: dict[str, Any] | None = None) -> dict[str, Any]:
     if len(urls) > max_urls or len(urls) != len(set(urls)):
         raise ValueError(f"Use at most {max_urls} different, explicitly listed URLs per run")
 
@@ -854,6 +860,7 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
         "total_requests": sent,
         "finding_count": len(findings),
         "findings_by_category": summarize(findings),
+        "findings_by_owasp_top10_2025": summarize_by_owasp(findings),
         "findings": findings,
         "correlated_assumption_hypotheses": correlated,
         "correlated_hypothesis_count": len(correlated),
@@ -862,6 +869,7 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
         "errors": errors,
         "openapi_review": api_meta,
         "active_payload_testing": enable_active_payloads,
+        "domain_scope": domain_scope,
         "not_tested": not_tested,
         "privacy": "No response bodies, credentials, cookie names/values, redirect destinations or session tokens were stored, "
                    "except transient parsing of payload-test responses for marker/signature matching, which is never persisted.",
@@ -886,6 +894,37 @@ def markdown_report(result: dict[str, Any]) -> str:
         "This audit stated security assumptions, observed safe HTTP/contract behavior, and compared the two. A contradiction is a hypothesis—not proof of a security breach.",
         "",
     ]
+    domain_scope = result.get("domain_scope")
+    if domain_scope:
+        lines += [
+            "## Domain-wide subdomain scope",
+            "",
+            f"**Apex domain:** `{domain_scope['domain']}`",
+            "",
+            (f"**Candidates found (crt.sh + apex):** {domain_scope['candidates_found']} | "
+             f"**Live and in scope:** {domain_scope['live_and_in_scope']} | "
+             f"**Selected for testing:** {len(domain_scope['selected'])}"),
+            "",
+        ]
+        if domain_scope.get("excluded_by_pattern"):
+            lines += [
+                f"**Excluded by `--exclude-subdomain` pattern:** {', '.join(domain_scope['excluded_by_pattern'])}",
+                "",
+            ]
+        if domain_scope.get("truncated_by_ceiling"):
+            lines += [
+                ("**Note:** more live subdomains were found than the safety ceiling allows; some were not tested. "
+                 "Narrow the scope with `--exclude-subdomain` or raise `--max-subdomains` (within its limit) to cover the rest."),
+                "",
+            ]
+    owasp_summary = result.get("findings_by_owasp_top10_2025")
+    if owasp_summary:
+        lines += [
+            "## Findings by OWASP Top 10:2025 category",
+            "",
+            "(OWASP has not published a separate 2026 edition; Top 10:2025, finalized January 2026, is the current standard applicable through 2026.)",
+            "",
+        ] + [f"- **{code}:** {count}" for code, count in owasp_summary.items()] + [""]
     if not result["findings"]:
         lines += [
             "## Findings",
@@ -897,7 +936,7 @@ def markdown_report(result: dict[str, Any]) -> str:
         lines += [
             f"## Finding {number}: {finding['title']}",
             "",
-            f"**ID:** `{finding['id']}` | **Rule:** `{finding['rule']}` | **Class:** {finding['taxonomy']['category']} / {finding['taxonomy']['subtype']} ({finding['taxonomy']['cwe'] or 'no CWE'}) | **Priority:** {finding['priority']} | **Status:** {finding['status']}",
+            f"**ID:** `{finding['id']}` | **Rule:** `{finding['rule']}` | **Class:** {finding['taxonomy']['category']} / {finding['taxonomy']['subtype']} ({finding['taxonomy']['cwe'] or 'no CWE'}) | **OWASP 2025:** {finding['taxonomy'].get('owasp_top10_2025') or 'n/a'} | **Priority:** {finding['priority']} | **Status:** {finding['status']}",
             "",
             f"**Affected endpoint/contract:** `{finding['target']}`",
             "",
@@ -987,8 +1026,17 @@ def main(argv: list[str] | None = None) -> int:
                               "Requires --authorized. Never modifies/deletes data or extracts real content.")
     parser.add_argument("--max-injection-points", type=int, default=MAX_INJECTION_POINTS,
                          help="Cap on tested parameters per URL when --enable-active-payloads is set (1-5, default 3)")
-    parser.add_argument("--domain", help="Apex domain you are AUTHORIZED to test; discovers subdomains passively (crt.sh + DNS) and adds them to --url")
-    parser.add_argument("--max-subdomains", type=int, default=5, help="Cap on subdomains added from --domain (1-15, default 5)")
+    parser.add_argument("--domain", help="Apex domain you are AUTHORIZED to test; automatically discovers and enumerates "
+                                          "every live subdomain (crt.sh + DNS) up to --max-subdomains and adds them to --url")
+    parser.add_argument("--max-subdomains", type=int, default=MAX_SUBDOMAINS_CEILING,
+                         help=f"Cap on subdomains added from --domain (1-{MAX_SUBDOMAINS_CEILING}, default "
+                              f"{MAX_SUBDOMAINS_CEILING} = effectively every discovered, live subdomain)")
+    parser.add_argument("--exclude-subdomain", action="append", default=[],
+                         help="Exact hostname or glob pattern (e.g. 'internal.example.com', 'dev-*.example.com') "
+                              "to exclude from --domain discovery; repeatable")
+    parser.add_argument("--domain-minimal-checks", action="store_true",
+                         help="With --domain, do not automatically enable --cors/--check-redirects/"
+                              "--check-sensitive-paths/--check-tls; run only the always-on baseline checks")
     parser.add_argument("--openapi", type=Path, help="Optional LOCAL OpenAPI JSON specification to review offline")
     parser.add_argument("--authorized", action="store_true", help="Affirm explicit permission for every HTTP target")
     parser.add_argument("--delay", type=float, default=1, help="Seconds between requests (minimum 0.5)")
@@ -997,17 +1045,29 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     urls = list(args.url)
+    domain_scope = None
     if args.domain:
         if not args.authorized:
             parser.error("--domain requires --authorized AND permission from the domain owner")
-        if not 1 <= args.max_subdomains <= 15:
-            parser.error("--max-subdomains must be between 1 and 15")
+        if not 1 <= args.max_subdomains <= MAX_SUBDOMAINS_CEILING:
+            parser.error(f"--max-subdomains must be between 1 and {MAX_SUBDOMAINS_CEILING}")
         try:
-            from decrypto_subdomain_scan import discover_authorized_subdomains
-            discovered = discover_authorized_subdomains(args.domain, max_subdomains=args.max_subdomains)
+            from decrypto_subdomain_scan import discover_authorized_subdomains_report
+            domain_scope = discover_authorized_subdomains_report(
+                args.domain, max_subdomains=args.max_subdomains, exclude=args.exclude_subdomain,
+            )
         except (ValueError, RuntimeError) as exc:
             parser.error(f"Subdomain discovery failed: {exc}")
-        urls.extend(u for u in discovered if u not in urls)
+        urls.extend(u for u in domain_scope["selected"] if u not in urls)
+        if not args.domain_minimal_checks:
+            # A whole-domain sweep is explicitly asked to cover "every type of
+            # bug" across every subdomain, so the always-safe (non-payload)
+            # checks are turned on automatically rather than requiring the
+            # operator to repeat four flags for every run.
+            args.cors = True
+            args.check_redirects = True
+            args.check_sensitive_paths = True
+            args.check_tls = True
 
     if not urls and not args.openapi:
         parser.error("Provide --url, --domain, or --openapi")
@@ -1018,7 +1078,8 @@ def main(argv: list[str] | None = None) -> int:
     if not 1 <= args.max_injection_points <= 5:
         parser.error("--max-injection-points must be between 1 and 5")
 
-    max_urls = 15 if args.domain else 12
+    max_urls = MAX_SUBDOMAINS_CEILING if args.domain else 12
+    request_cap = MAX_REQUESTS_PER_DOMAIN_RUN if args.domain else MAX_REQUESTS_PER_RUN
     per_url_requests = (
         (3 if args.verify_cors else 2 if args.cors else 1)
         + (len(REDIRECT_PARAMS) if args.check_redirects else 0)
@@ -1028,15 +1089,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     if len(urls) > max_urls:
         parser.error(f"Maximum of {max_urls} URLs per run")
-    if len(urls) * per_url_requests > 250:
-        parser.error("Maximum of 250 requests per run with the selected checks; reduce URLs or disable some --check-* flags")
+    if len(urls) * per_url_requests > request_cap:
+        parser.error(f"Maximum of {request_cap} requests per run with the selected checks; "
+                      "reduce URLs, exclude subdomains with --exclude-subdomain, or disable some --check-* flags")
 
     try:
         result = scan(urls, set(args.private_url), cors=args.cors, delay=args.delay, timeout=args.timeout, openapi=args.openapi,
                       verify_cors=args.verify_cors, check_redirects=args.check_redirects,
                       check_sensitive_paths=args.check_sensitive_paths, check_tls=args.check_tls,
                       enable_active_payloads=args.enable_active_payloads, max_injection_points=args.max_injection_points,
-                      max_urls=max_urls)
+                      max_urls=max_urls, domain_scope=domain_scope)
         json_path = args.out.with_suffix(".json")
         md_path = args.out.with_suffix(".md")
         json_path.parent.mkdir(parents=True, exist_ok=True)
