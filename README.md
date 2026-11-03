@@ -116,9 +116,35 @@ Live HTTP/OpenAPI checks (assumption-driven)
 
 - HSTS missing on HTTPS endpoints
 - Session-like cookies missing Secure/HttpOnly/SameSite attributes
-- CORS credential reflection + caching leads
+- CORS credential reflection + caching leads (see paired CORS verification above)
+- Missing framing protection, missing `nosniff`, and Server/X-Powered-By version banners
+  (always on; no extra requests)
+- `--check-redirects`: open-redirect reflection in the Location header (never followed)
+- `--check-sensitive-paths`: HEAD-only probe of `/.git/HEAD`, `/.env`, `/.aws/credentials`,
+  `/wp-config.php.bak` (2xx is a lead; SPA catch-alls cause false positives)
+- `--check-tls`: certificate expiry and weak negotiated protocol via one handshake per host
+- `--domain example.com`: passively finds
+  subdomains (crt.sh certificate-transparency logs + DNS resolution, via
+  `decrypto_subdomain_scan.py`) and adds up to `--max-subdomains` (default 5, max 15) to the
+  scan. Requires `--authorized`; the discovery step never contacts the subdomains itself.
 - Private-endpoint assumptions (gated by observable auth signals such as WWW-Authenticate or session-like Set-Cookie)
 - Offline OpenAPI contract inspection (API key-in-URL, mutating operations without documented security requirements)
+
+Bug-class taxonomy: every finding carries a `taxonomy` object (category, subtype, CWE,
+OWASP Top 10 2021) from `decrypto_taxonomy.py`, and reports include `findings_by_category`.
+Variants covered include CSP weaknesses (missing, `unsafe-inline`, `unsafe-eval`, wildcard
+sources, missing `object-src`/`base-uri`), Referrer-Policy and Permissions-Policy gaps,
+framework version headers, CORS wildcard, twelve sensitive-path kinds (version control,
+environment files, cloud credentials, backups, debug endpoints), and static crypto variants
+(ECB mode, deprecated TLS protocols, small RSA keys, low KDF iterations, JWT `none`,
+hardcoded IV/nonce). This is a bounded, passive rule set, not every possible bug class; it
+does not cover injection, XSS, IDOR or logic flaws, which need authorized manual testing.
+
+Exploitability verification: header, redirect, sensitive-path and TLS findings carry an optional `exploitability` object. It
+states whether the response data alone proves the mechanism, and what further
+owner-authorized testing is still needed. Status stays UNCONFIRMED until the owner
+validates real-world impact. The tool still sends no injection/XSS/SQLi payloads,
+brute-force, IDOR, or load tests.
 
 Important safety and privacy constraints
 

@@ -8,12 +8,14 @@ review, not confirmed vulnerabilities.
 """
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import re
 from pathlib import Path
 from typing import Any
 
+from decrypto_taxonomy import classify, summarize
 from decrypto_nonce_checks import check_python_aead_nonces
 
 # Reuse the new_finding factory shape from the main scanner by reconstructing a
@@ -32,6 +34,7 @@ def _make_finding(rule: str, target: str, title: str, evidence: dict[str, Any], 
         "priority": priority,
         "status": "UNCONFIRMED — needs owner validation",
         "evidence_class": "static_code_finding",
+        "taxonomy": classify(rule),
         "evidence": evidence,
         "remediation": evidence.get("remediation", "Review and fix the highlighted usage."),
     }
@@ -48,10 +51,10 @@ _PATTERNS = [
     (re.compile(r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----"), "CRYPTO-PEM-IN-CODE", "Private key PEM embedded in repository"),
 
     # Weak hashes
-    (re.compile(r"\b(md5|sha1|md4)\b"), "CRYPTO-WEAK-HASH", "Use of deprecated or weak hash algorithm"),
+    (re.compile(r"(?i)\b(md5|sha-?1|md4)\b"), "CRYPTO-WEAK-HASH", "Use of deprecated or weak hash algorithm"),
 
     # Insecure ciphers/modes
-    (re.compile(r"\b(aes-?ecb|des|rc4|3des|tripledes)\b"), "CRYPTO-WEAK-CIPHER", "Use of weak cipher or insecure mode (ECB/RC4/DES)"),
+    (re.compile(r"(?i)\b(aes-?ecb|des|rc4|3des|tripledes)\b"), "CRYPTO-WEAK-CIPHER", "Use of weak cipher or insecure mode (ECB/RC4/DES)"),
 
     # Insecure RNG usage in Python or JS
     (re.compile(r"\brandom\.random\(|\brandom\.seed\(|\bMath\.random\(|\bseedrandom\b"), "CRYPTO-INSECURE-RNG", "Use of non-cryptographic RNG or explicit seeding"),
@@ -64,6 +67,15 @@ _PATTERNS = [
 
     # Rolling-your-own crypto (use of low-level primitives without AE)
     (re.compile(r"\b(createCipher\b|Cipher\(|crypto\.createCipher|CryptoJS)"), "CRYPTO-POTENTIALLY-ROLLING", "Potential use of low-level cipher APIs; ensure authenticated encryption and correct IV/nonce usage"),
+
+    # Variants: block-mode, protocol, key-size, KDF cost, JWT and static IV issues
+    (re.compile(r"\bMODE_ECB\b|(?i:createCipheriv\(\s*['\"][a-z0-9-]*ecb)"), "CRYPTO-ECB-MODE", "ECB block mode selected explicitly"),
+    (re.compile(r"\bPROTOCOL_(?:SSLv2|SSLv3|SSLv23|TLSv1|TLSv1_1)\b|secureProtocol\s*:\s*['\"](?:SSLv3|TLSv1)"), "CRYPTO-TLS-OLD-PROTOCOL", "Deprecated SSL/TLS protocol version selected"),
+    (re.compile(r"\bcheck_hostname\s*=\s*False\b|\bCERT_NONE\b"), "CRYPTO-TLS-WORKAROUND", "TLS certificate validation disabled or bypassed"),
+    (re.compile(r"(?:key_size\s*=\s*|modulusLength\s*:\s*)(?:512|768|1024)\b"), "CRYPTO-SMALL-RSA-KEY", "RSA key size below 2048 bits"),
+    (re.compile(r"(?i)iterations\s*=\s*[1-9]\d{0,4}\b(?!\d)"), "CRYPTO-WEAK-KDF-ITERATIONS", "Password KDF iteration count below 100000"),
+    (re.compile(r"(?i)[\"']alg[\"']\s*:\s*[\"']none[\"']|algorithms\s*=\s*\[\s*[\"']none[\"']"), "CRYPTO-JWT-NONE-ALG", "JWT 'none' algorithm accepted or issued"),
+    (re.compile(r"(?i)\b(?:iv|nonce)\s*=\s*b?[\"'][^\"']{8,}[\"']"), "CRYPTO-STATIC-IV", "Hardcoded IV or nonce literal"),
 ]
 
 
@@ -77,14 +89,22 @@ def _scan_text(path: Path, root: Path, text: str) -> list[dict[str, Any]]:
     """Scan a file once against the compiled regex list and collect findings."""
     findings: list[dict[str, Any]] = []
     relative_path = str(path.relative_to(root))
+    # Precompute newline offsets so each match's line number is a binary search, not a rescan.
+    newlines = [i for i, ch in enumerate(text) if ch == "\n"]
     for pattern, rule, title in _PATTERNS:
         for m in pattern.finditer(text):
             evidence = {
                 "file": relative_path,
-                "line": text.count("\n", 0, m.start()) + 1,
+                "line": bisect.bisect_left(newlines, m.start()) + 1,
+                "column": m.start() - text.rfind("\n", 0, m.start()),
                 "match_excerpt": _match_excerpt(text, m.start(), m.end()),
             }
-            findings.append(_make_finding(rule, evidence["file"], title, evidence))
+            findings.append(_make_finding(
+                rule,
+                f'{evidence["file"]}:{evidence["line"]}:{evidence["column"]}',
+                title,
+                evidence,
+            ))
     return findings
 
 
@@ -130,7 +150,7 @@ def scan_repo_for_crypto_issues(root: Path, languages: list[str] | None = None) 
             findings.extend(check_python_aead_nonces(text, str(path.relative_to(root))))
 
     meta = {"files_inspected": inspected, "languages": languages, "finding_count": len(findings)}
-    return {"findings": findings, "meta": meta}
+    return {"findings": findings, "meta": meta, "findings_by_category": summarize(findings)}
 
 
 if __name__ == "__main__":

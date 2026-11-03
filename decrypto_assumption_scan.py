@@ -13,6 +13,7 @@ import http.client
 import json
 import math
 import re
+import socket
 import ssl
 import sys
 import time
@@ -23,10 +24,29 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPHandler, HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from decrypto_taxonomy import classify, summarize
 from decrypto_validation import ORIGINS, evaluate_cors_pair, metadata
 
 VERSION = "1.3"
 MARKER_ORIGIN = "https://audit-origin.invalid"
+REDIRECT_MARKER = "https://audit-redirect.invalid/"
+REDIRECT_PARAMS = ("redirect", "return", "next")
+SENSITIVE_PATH_KINDS = {
+    "/.git/HEAD": "version-control",
+    "/.svn/entries": "version-control",
+    "/.env": "environment-file",
+    "/.aws/credentials": "cloud-credentials",
+    "/.htpasswd": "credential-file",
+    "/id_rsa": "private-key",
+    "/wp-config.php.bak": "backup-file",
+    "/backup.zip": "backup-file",
+    "/.DS_Store": "metadata-file",
+    "/phpinfo.php": "debug-endpoint",
+    "/server-status": "debug-endpoint",
+    "/actuator/env": "debug-endpoint",
+}
+SENSITIVE_PATHS = tuple(SENSITIVE_PATH_KINDS)
+WEAK_TLS_PROTOCOLS = {"SSLv2", "SSLv3", "TLSv1", "TLSv1.1"}
 SESSION_NAME = re.compile(r"(?:session|sessid|(^|[_-])sid($|[_-])|auth|token|jwt|login)", re.I)
 METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
 
@@ -73,8 +93,16 @@ def validate_url(url: str) -> str:
 
 def new_finding(rule: str, url: str, title: str, assumption: str,
                 evidence: dict[str, Any], reasoning: str, fix: str, verification: str,
-                priority: str = "review") -> dict[str, Any]:
-    return {
+                priority: str = "review", exploitability: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build a finding.
+
+    `exploitability`, when provided, states — in a conservative, falsifiable way —
+    whether the *observed response data alone* (never an attack payload) already
+    confirms the mechanism, or whether further owner-authorized testing is still
+    required before any impact claim. It never upgrades `status`, which always
+    stays UNCONFIRMED until the owner validates real-world impact.
+    """
+    finding = {
         "id": hashlib.sha256((rule + "|" + url).encode()).hexdigest()[:10].upper(),
         "rule": rule,
         "target": url,
@@ -87,7 +115,14 @@ def new_finding(rule: str, url: str, title: str, assumption: str,
         "how_model_found_it": reasoning,
         "remediation": fix,
         "validation_needed": verification,
+        "taxonomy": classify(rule),
     }
+    if exploitability is not None:
+        finding["exploitability"] = exploitability
+    return finding
+
+
+
 
 
 def directives(headers: Message, name: str) -> dict[str, str]:
@@ -271,6 +306,322 @@ def cors_checks(url: str, status: int, headers: Message) -> list[dict[str, Any]]
     return findings
 
 
+def _throttled_send(opener, state: dict[str, int], delay: float, url: str, method: str,
+                     origin: str | None, timeout: float):
+    """Send one request, sleeping `delay` seconds before every request after the first.
+
+    `state["sent"]` is shared across every check in a single `scan()` run so the
+    rate limit applies to the whole run, not just one check's own requests.
+    """
+    if state["sent"]:
+        time.sleep(delay)
+    state["sent"] += 1
+    return send(opener, url, method, origin, timeout)
+
+
+def security_header_checks(url: str, status: int, headers: Message) -> list[dict[str, Any]]:
+    """Check framing, MIME-sniffing and version-disclosure headers on a normal response.
+
+    Uses only headers already received for the baseline request — no extra
+    requests are sent. Header *absence* is directly verifiable from the
+    response alone, so each finding states that plainly; whether it is
+    actually exploitable still depends on page content the tool never reads.
+    """
+    findings: list[dict[str, Any]] = []
+    if status >= 400:
+        return findings
+
+    frame_options = (headers.get("X-Frame-Options") or "").strip()
+    csp = headers.get("Content-Security-Policy") or ""
+    if not frame_options and "frame-ancestors" not in csp.lower():
+        findings.append(new_finding(
+            "CLICKJACK-HEADERS",
+            url,
+            "No framing-protection header observed",
+            "Pages should declare an explicit framing policy (X-Frame-Options or CSP frame-ancestors).",
+            {"status": status, "x_frame_options": "absent", "csp_frame_ancestors": "absent"},
+            "Compared the response headers to the expected framing-control invariant.",
+            "Add X-Frame-Options: DENY/SAMEORIGIN or a Content-Security-Policy with frame-ancestors.",
+            "Confirm the page renders sensitive, state-changing UI in a browser before treating this as clickjackable; static or non-interactive pages are lower risk.",
+            "low",
+            exploitability={
+                "directly_verifiable": True,
+                "method": "header_absence",
+                "requires_additional_testing": "Confirm the page has sensitive interactive UI that is worth framing",
+            },
+        ))
+
+    content_type_options = (headers.get("X-Content-Type-Options") or "").strip().lower()
+    if content_type_options != "nosniff":
+        findings.append(new_finding(
+            "MIME-SNIFF",
+            url,
+            "X-Content-Type-Options: nosniff not observed",
+            "Responses should opt browsers out of MIME type sniffing.",
+            {"status": status, "x_content_type_options": content_type_options or "absent"},
+            "Compared the response header to the expected anti-sniffing invariant.",
+            "Add X-Content-Type-Options: nosniff.",
+            "Confirm the endpoint serves user-influenced content before treating this as exploitable; a reflection/upload vector is required.",
+            "low",
+            exploitability={
+                "directly_verifiable": True,
+                "method": "header_absence",
+                "requires_additional_testing": "Yes — needs a content reflection/upload vector to be exploitable",
+            },
+        ))
+
+    banner = " ".join(filter(None, [headers.get("Server"), headers.get("X-Powered-By")])).strip()
+    if re.search(r"\d+\.\d+(\.\d+)?", banner):
+        findings.append(new_finding(
+            "SERVER-BANNER",
+            url,
+            "Server/X-Powered-By header discloses version information",
+            "Version banners should not be exposed, to reduce targeted exploitation of known CVEs.",
+            {"status": status, "banner_excerpt": banner[:80]},
+            "Parsed the Server/X-Powered-By headers for an embedded version number.",
+            "Suppress or genericize version banners at the web server/framework layer.",
+            "Match the disclosed version against a CVE database to assess real risk; a version string alone is not a vulnerability.",
+            "low",
+            exploitability={
+                "directly_verifiable": True,
+                "method": "header_disclosure",
+                "requires_additional_testing": "Match the disclosed version against known CVEs",
+            },
+        ))
+
+    findings.extend(header_variant_checks(url, status, headers))
+    return findings
+
+
+FRAMEWORK_HEADERS = ("X-AspNet-Version", "X-AspNetMvc-Version", "X-Generator", "X-Drupal-Cache", "X-Runtime")
+
+
+def _header_finding(rule: str, url: str, title: str, assumption: str, evidence: dict[str, Any],
+                    fix: str, verification: str, priority: str = "low") -> dict[str, Any]:
+    return new_finding(
+        rule, url, title, assumption, evidence,
+        "Parsed the response headers already received for the baseline request; no extra request was sent.",
+        fix, verification, priority,
+        exploitability={"directly_verifiable": True, "method": "header_analysis",
+                        "requires_additional_testing": "Confirm real impact on the specific page and browsers in scope"},
+    )
+
+
+def header_variant_checks(url: str, status: int, headers: Message) -> list[dict[str, Any]]:
+    """Variant-level header findings: CSP weaknesses, referrer/permissions policy, framework banners, CORS wildcard."""
+    findings: list[dict[str, Any]] = []
+    csp_values = headers.get_all("Content-Security-Policy", [])
+    csp = {part.strip().split(None, 1)[0].lower(): (part.strip().split(None, 1)[1] if " " in part.strip() else "")
+           for value in csp_values for part in value.split(";") if part.strip()}
+
+    if not csp_values:
+        findings.append(_header_finding(
+            "CSP-MISSING", url, "No Content-Security-Policy header observed",
+            "Pages should restrict script and resource origins with a CSP to limit XSS impact.",
+            {"status": status, "content_security_policy": "absent"},
+            "Add a restrictive Content-Security-Policy (default-src 'self' plus nonces/hashes for scripts).",
+            "CSP is defence in depth; confirm whether the page handles untrusted content before treating it as risk."))
+    else:
+        script_src = (csp.get("script-src") or csp.get("default-src") or "").lower()
+        if "'unsafe-inline'" in script_src and "'nonce-" not in script_src and "'strict-dynamic'" not in script_src:
+            findings.append(_header_finding(
+                "CSP-UNSAFE-INLINE", url, "CSP allows unsafe-inline scripts",
+                "A CSP should block inline script execution.",
+                {"status": status, "directive": "script-src/default-src", "token": "'unsafe-inline'"},
+                "Remove 'unsafe-inline'; use nonces or hashes.",
+                "Weakens XSS mitigation only; it is not itself an XSS vulnerability.", "review"))
+        if "'unsafe-eval'" in script_src:
+            findings.append(_header_finding(
+                "CSP-UNSAFE-EVAL", url, "CSP allows unsafe-eval",
+                "A CSP should block string-to-code evaluation.",
+                {"status": status, "directive": "script-src/default-src", "token": "'unsafe-eval'"},
+                "Remove 'unsafe-eval' and refactor code that needs eval().",
+                "Weakens XSS mitigation only; it is not itself an XSS vulnerability."))
+        wide = [tok for tok in script_src.split() if tok in ("*", "https:", "http:", "data:")]
+        if wide:
+            findings.append(_header_finding(
+                "CSP-WILDCARD-SOURCE", url, "CSP script source allows a wildcard or whole scheme",
+                "Script sources should be an explicit allowlist.",
+                {"status": status, "directive": "script-src/default-src", "tokens": sorted(set(wide))},
+                "Replace wildcard/scheme sources with specific origins, nonces or hashes.",
+                "Check whether any allowed origin lets attackers host script (JSONP, open buckets).", "review"))
+        missing = [d for d in ("object-src", "base-uri") if d not in csp]
+        if missing:
+            findings.append(_header_finding(
+                "CSP-MISSING-DIRECTIVES", url, "CSP lacks object-src and/or base-uri",
+                "These directives do not fall back to default-src and are common CSP bypass paths.",
+                {"status": status, "missing_directives": missing},
+                "Add object-src 'none' and base-uri 'self'.",
+                "Defence-in-depth gap; confirm with the owner."))
+
+    referrer = (headers.get("Referrer-Policy") or "").strip().lower()
+    if not referrer or referrer in ("unsafe-url", "no-referrer-when-downgrade"):
+        findings.append(_header_finding(
+            "REFERRER-POLICY", url, "Referrer-Policy missing or leaks full URLs",
+            "Responses should limit referrer data sent to other origins.",
+            {"status": status, "referrer_policy": referrer or "absent"},
+            "Set Referrer-Policy: strict-origin-when-cross-origin (or stricter).",
+            "Matters only if URLs on this site carry sensitive data."))
+
+    if not headers.get("Permissions-Policy") and not headers.get("Feature-Policy"):
+        findings.append(_header_finding(
+            "PERMISSIONS-POLICY", url, "No Permissions-Policy header observed",
+            "Pages should disable browser features they do not use.",
+            {"status": status, "permissions_policy": "absent"},
+            "Add a Permissions-Policy denying camera, microphone, geolocation, etc. unless needed.",
+            "Hardening only; low impact."))
+
+    exposed = [name for name in FRAMEWORK_HEADERS if headers.get(name)]
+    if exposed:
+        findings.append(_header_finding(
+            "FRAMEWORK-BANNER", url, "Framework/CMS version header exposed",
+            "Framework fingerprinting headers should be removed.",
+            {"status": status, "headers": exposed},
+            "Remove or genericize these headers.",
+            "Match any disclosed version against known CVEs."))
+
+    allow = (headers.get("Access-Control-Allow-Origin") or "").strip()
+    creds = (headers.get("Access-Control-Allow-Credentials") or "").strip()
+    if allow == "*":
+        findings.append(_header_finding(
+            "CORS-WILDCARD", url, "Access-Control-Allow-Origin wildcard",
+            "Cross-origin access should be limited to approved origins.",
+            {"status": status, "allow_origin": "*", "allow_credentials_header": creds or "absent"},
+            "Use an explicit origin allowlist unless the resource is intentionally public.",
+            "Browsers refuse credentialed requests with '*'; confirm the content is public before reporting."))
+    return findings
+
+
+def open_redirect_checks(opener, state: dict[str, int], delay: float, url: str, timeout: float) -> list[dict[str, Any]]:
+    """Probe common redirect-style query parameters for unvalidated reflection.
+
+    Appends a harmless, clearly-marked external URL to a redirect-style query
+    parameter; redirects are never followed (see NoRedirect), only the
+    Location header is inspected. Stops at the first confirmed parameter to
+    minimize requests.
+    """
+    parsed = urlsplit(url)
+    findings: list[dict[str, Any]] = []
+    for param in REDIRECT_PARAMS:
+        test_url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, f"{param}={REDIRECT_MARKER}", ""))
+        try:
+            status, headers = _throttled_send(opener, state, delay, test_url, "GET", None, timeout)
+        except (HTTPError, URLError, TimeoutError, ssl.SSLError, OSError, http.client.HTTPException):
+            continue
+        location = (headers.get("Location") or "") if headers else ""
+        if 300 <= status < 400 and location.startswith(REDIRECT_MARKER):
+            findings.append(new_finding(
+                "OPEN-REDIRECT",
+                url,
+                "Unvalidated redirect target reflected in Location header",
+                "Redirect-handling parameters should only redirect to an allowlisted set of destinations.",
+                {"status": status, "tested_parameter": param, "location_matches_marker": True},
+                "Supplied a harmless, clearly-marked external URL in a common redirect parameter and observed it reflected in the Location header. The redirect was never followed.",
+                "Validate redirect targets against an allowlist of paths/domains before issuing a redirect.",
+                "Confirm end-user impact (e.g., phishing or token-leak chaining) with the asset owner; no browser redirect was actually followed by this tool.",
+                "review",
+                exploitability={
+                    "directly_verifiable": True,
+                    "method": "location_header_reflection",
+                    "requires_additional_testing": "Owner confirmation of real-world phishing/credential-leak impact",
+                },
+            ))
+            break
+    return findings
+
+
+def sensitive_path_checks(opener, state: dict[str, int], delay: float, url: str, timeout: float) -> list[dict[str, Any]]:
+    """HEAD-probe a short list of well-known sensitive paths.
+
+    Uses HEAD only, so no response body is ever read or stored, preserving the
+    tool's privacy guarantee. A 2xx status is a lead, not confirmation — many
+    servers return 200 for any path via SPA catch-all routing.
+    """
+    parsed = urlsplit(url)
+    findings: list[dict[str, Any]] = []
+    for sub in SENSITIVE_PATHS:
+        test_url = urlunsplit((parsed.scheme, parsed.netloc, sub, "", ""))
+        try:
+            status, _headers = _throttled_send(opener, state, delay, test_url, "HEAD", None, timeout)
+        except (HTTPError, URLError, TimeoutError, ssl.SSLError, OSError, http.client.HTTPException):
+            continue
+        if 200 <= status < 300:
+            findings.append(new_finding(
+                "SENSITIVE-PATH-EXPOSED",
+                url,
+                f"Potentially sensitive path responded 2xx: {sub}",
+                "Version-control and credential files should not be reachable over HTTP.",
+                {"status": status, "path": sub, "kind": SENSITIVE_PATH_KINDS[sub]},
+                "Requested a well-known sensitive path with HEAD only; no response body was read or stored.",
+                "Block access to VCS directories and credential/config files at the web server layer; verify they are not present in the deployed webroot.",
+                "Many servers return 200 for any path (SPA catch-all routing); manually confirm within your authorized session that the body actually contains the sensitive file before reporting.",
+                "review",
+                exploitability={
+                    "directly_verifiable": False,
+                    "method": "head_status_only",
+                    "requires_additional_testing": "Confirm with an authorized GET that the response body is the real sensitive file, not a generic catch-all page",
+                },
+            ))
+    return findings
+
+
+def tls_checks(hostname: str, port: int, timeout: float) -> list[dict[str, Any]]:
+    """Open one TLS connection to read the certificate expiry and negotiated protocol.
+
+    No HTTP request is sent on this connection; only the TLS handshake metadata
+    is inspected. Errors are swallowed because this check is best-effort and
+    optional (`--check-tls`).
+    """
+    findings: list[dict[str, Any]] = []
+    target = f"https://{hostname}/"
+    context = ssl.create_default_context()
+    try:
+        with socket.create_connection((hostname, port), timeout=timeout) as sock:
+            with context.wrap_socket(sock, server_hostname=hostname) as tls_sock:
+                cert = tls_sock.getpeercert()
+                protocol = tls_sock.version()
+    except (OSError, ssl.SSLError, socket.timeout):
+        return findings
+
+    not_after = cert.get("notAfter") if cert else None
+    if not_after:
+        try:
+            expiry = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+        except ValueError:
+            expiry = None
+        if expiry is not None:
+            days_left = (expiry - datetime.now(timezone.utc)).days
+            if days_left < 14:
+                findings.append(new_finding(
+                    "TLS-CERT-EXPIRY",
+                    target,
+                    "TLS certificate is expired or expiring soon",
+                    "Certificates should be renewed well before expiry to avoid trust failures.",
+                    {"not_after": not_after, "days_left": days_left},
+                    "Read the peer certificate's notAfter field from the TLS handshake; no HTTP request was sent.",
+                    "Renew the certificate and confirm automated renewal (e.g., ACME) is configured.",
+                    "Directly verifiable from the certificate itself; no further testing needed.",
+                    "high" if days_left < 0 else "review",
+                    exploitability={"directly_verifiable": True, "method": "tls_certificate_metadata", "requires_additional_testing": "No"},
+                ))
+
+    if protocol in WEAK_TLS_PROTOCOLS:
+        findings.append(new_finding(
+            "TLS-WEAK-PROTOCOL",
+            target,
+            f"Weak TLS protocol version negotiated: {protocol}",
+            "Servers should negotiate TLS 1.2 or newer only.",
+            {"negotiated_protocol": protocol},
+            "Read the negotiated protocol version from the TLS handshake; no HTTP request was sent.",
+            "Disable SSLv2/SSLv3/TLS1.0/TLS1.1 on the server and require TLS 1.2+.",
+            "Directly verifiable from the handshake itself; no further testing needed.",
+            "high",
+            exploitability={"directly_verifiable": True, "method": "tls_handshake_metadata", "requires_additional_testing": "No"},
+        ))
+
+    return findings
+
+
 def inspect_openapi(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """Inspect only a local JSON contract, never download/follow external refs."""
     if path.stat().st_size > 2_000_000:
@@ -389,9 +740,11 @@ def correlate_assumptions(findings: list[dict[str, Any]]) -> list[dict[str, Any]
 
 def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
          delay: float = 1.0, timeout: float = 6.0, openapi: Path | None = None,
-         verify_cors: bool = False) -> dict[str, Any]:
-    if len(urls) > 12 or len(urls) != len(set(urls)):
-        raise ValueError("Use at most 12 different, explicitly listed URLs per run")
+         verify_cors: bool = False, check_redirects: bool = False,
+         check_sensitive_paths: bool = False, check_tls: bool = False,
+         max_urls: int = 12) -> dict[str, Any]:
+    if len(urls) > max_urls or len(urls) != len(set(urls)):
+        raise ValueError(f"Use at most {max_urls} different, explicitly listed URLs per run")
 
     normalized_urls: list[str] = []
     seen: set[str] = set()
@@ -443,8 +796,21 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
                     findings.extend(cors_checks(url, status, headers))
             else:
                 findings.extend(observe(url, status, headers, url in normalized_private_urls))
+                findings.extend(security_header_checks(url, status, headers))
         if verify_cors:
             paired_verification.append(evaluate_cors_pair(url, pair_samples))
+
+        state = {"sent": sent}
+        if check_redirects:
+            findings.extend(open_redirect_checks(opener, state, delay, url, timeout))
+        if check_sensitive_paths:
+            findings.extend(sensitive_path_checks(opener, state, delay, url, timeout))
+        if check_tls and urlsplit(url).scheme == "https":
+            if state["sent"]:
+                time.sleep(delay)
+            state["sent"] += 1
+            findings.extend(tls_checks(urlsplit(url).hostname, urlsplit(url).port or 443, timeout))
+        sent = state["sent"]
 
     findings.extend(api_findings)
 
@@ -465,6 +831,7 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
         "scope": normalized_urls,
         "total_requests": sent,
         "finding_count": len(findings),
+        "findings_by_category": summarize(findings),
         "findings": findings,
         "correlated_assumption_hypotheses": correlated,
         "correlated_hypothesis_count": len(correlated),
@@ -475,12 +842,13 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
         "not_tested": [
             "exploitation",
             "credential attacks",
-            "parameter injection",
+            "SQL/command/template injection payloads",
             "object ID substitution",
             "data extraction",
             "cryptographic nonce attacks",
             "cross-account access",
             "bypassing access controls",
+            "denial-of-service or load testing",
         ],
         "privacy": "No response bodies, credentials, cookie names/values, redirect destinations or session tokens were stored.",
     }
@@ -515,7 +883,7 @@ def markdown_report(result: dict[str, Any]) -> str:
         lines += [
             f"## Finding {number}: {finding['title']}",
             "",
-            f"**ID:** `{finding['id']}` | **Rule:** `{finding['rule']}` | **Priority:** {finding['priority']} | **Status:** {finding['status']}",
+            f"**ID:** `{finding['id']}` | **Rule:** `{finding['rule']}` | **Class:** {finding['taxonomy']['category']} / {finding['taxonomy']['subtype']} ({finding['taxonomy']['cwe'] or 'no CWE'}) | **Priority:** {finding['priority']} | **Status:** {finding['status']}",
             "",
             f"**Affected endpoint/contract:** `{finding['target']}`",
             "",
@@ -533,6 +901,17 @@ def markdown_report(result: dict[str, Any]) -> str:
             "",
             "**Evidence required before a vulnerability report:** " + finding["validation_needed"],
             "",
+        ]
+        exploitability = finding.get("exploitability")
+        if exploitability is not None:
+            verified = "YES — response data alone confirms this mechanism" if exploitability.get("directly_verifiable") else "No — further owner-authorized testing required"
+            lines += [
+                f"**Exploitability verification:** {verified} (method: `{exploitability.get('method')}`)",
+                "",
+                f"**Further testing required:** {exploitability.get('requires_additional_testing')}",
+                "",
+            ]
+        lines += [
             "**Reproduction scope:** Credential-free HEAD/GET observations (up to two harmless Origin probes), or offline local contract inspection, limited to the explicitly authorized URL. No payloads or sensitive elements were stored.",
             "",
         ]
@@ -582,6 +961,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--private-url", action="append", default=[], help="One of --url values that should deny anonymous GET")
     parser.add_argument("--cors", action="store_true", help="Add one credential-free GET per URL with innocuous Origin")
     parser.add_argument("--verify-cors", action="store_true", help="Compare two credential-free Origin probes; never proves exploitability")
+    parser.add_argument("--check-redirects", action="store_true", help="Probe common redirect parameters for unvalidated open-redirect reflection")
+    parser.add_argument("--check-sensitive-paths", action="store_true", help="HEAD-probe a short list of well-known sensitive paths (.git/HEAD, .env, etc.)")
+    parser.add_argument("--check-tls", action="store_true", help="Read TLS certificate expiry and negotiated protocol via one handshake per HTTPS URL")
+    parser.add_argument("--domain", help="Apex domain you are AUTHORIZED to test; discovers subdomains passively (crt.sh + DNS) and adds them to --url")
+    parser.add_argument("--max-subdomains", type=int, default=5, help="Cap on subdomains added from --domain (1-15, default 5)")
     parser.add_argument("--openapi", type=Path, help="Optional LOCAL OpenAPI JSON specification to review offline")
     parser.add_argument("--authorized", action="store_true", help="Affirm explicit permission for every HTTP target")
     parser.add_argument("--delay", type=float, default=1, help="Seconds between requests (minimum 0.5)")
@@ -589,15 +973,40 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=Path("decrypto_findings"), help="Report prefix; generates .json and .md")
     args = parser.parse_args(argv)
 
-    if not args.url and not args.openapi:
-        parser.error("Provide --url or --openapi")
-    if args.url and not args.authorized:
+    urls = list(args.url)
+    if args.domain:
+        if not args.authorized:
+            parser.error("--domain requires --authorized AND permission from the domain owner")
+        if not 1 <= args.max_subdomains <= 15:
+            parser.error("--max-subdomains must be between 1 and 15")
+        try:
+            from decrypto_subdomain_scan import discover_authorized_subdomains
+            discovered = discover_authorized_subdomains(args.domain, max_subdomains=args.max_subdomains)
+        except (ValueError, RuntimeError) as exc:
+            parser.error(f"Subdomain discovery failed: {exc}")
+        urls.extend(u for u in discovered if u not in urls)
+
+    if not urls and not args.openapi:
+        parser.error("Provide --url, --domain, or --openapi")
+    if urls and not args.authorized:
         parser.error("Web/API tests require --authorized AND permission from the asset owner")
-    if len(args.url) * (3 if args.verify_cors else 2 if args.cors else 1) > 24:
-        parser.error("Maximum of 24 requests per run")
+
+    max_urls = 15 if args.domain else 12
+    per_url_requests = (
+        (3 if args.verify_cors else 2 if args.cors else 1)
+        + (len(REDIRECT_PARAMS) if args.check_redirects else 0)
+        + (len(SENSITIVE_PATHS) if args.check_sensitive_paths else 0)
+        + (1 if args.check_tls else 0)
+    )
+    if len(urls) > max_urls:
+        parser.error(f"Maximum of {max_urls} URLs per run")
+    if len(urls) * per_url_requests > 250:
+        parser.error("Maximum of 250 requests per run with the selected checks; reduce URLs or disable some --check-* flags")
 
     try:
-        result = scan(args.url, set(args.private_url), cors=args.cors, delay=args.delay, timeout=args.timeout, openapi=args.openapi, verify_cors=args.verify_cors)
+        result = scan(urls, set(args.private_url), cors=args.cors, delay=args.delay, timeout=args.timeout, openapi=args.openapi,
+                      verify_cors=args.verify_cors, check_redirects=args.check_redirects,
+                      check_sensitive_paths=args.check_sensitive_paths, check_tls=args.check_tls, max_urls=max_urls)
         json_path = args.out.with_suffix(".json")
         md_path = args.out.with_suffix(".md")
         json_path.parent.mkdir(parents=True, exist_ok=True)
