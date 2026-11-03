@@ -123,6 +123,16 @@ Live HTTP/OpenAPI checks (assumption-driven)
 - `--check-sensitive-paths`: HEAD-only probe of `/.git/HEAD`, `/.env`, `/.aws/credentials`,
   `/wp-config.php.bak` (2xx is a lead; SPA catch-alls cause false positives)
 - `--check-tls`: certificate expiry (including already-expired certificates, which fail verification) via one TLS 1.2+ handshake per host
+- `--enable-active-payloads` (opt-in, requires `--authorized`): sends small, **non-destructive**
+  payloads to parameters the target page itself exposes in its own forms/links (never guessed
+  names) to verify SQL injection (error-based + time-based blind), reflected XSS (inert marker),
+  OS command injection (time-based blind) and path traversal (known-file signature match).
+  Payloads use only `sleep`-style timing side effects, an inert HTML marker, or a read of a
+  well-known non-secret OS file — never `DROP`/`UPDATE`/`DELETE`, data extraction, or a live
+  `<script>` callback. `--max-injection-points` (default 3, max 5) caps parameters tested per
+  URL. Confirmed findings still keep `status: UNCONFIRMED` but set
+  `exploitability.directly_verifiable: true` with the specific evidence (timing delta, error
+  signature, marker reflection, or file signature).
 - `--domain example.com`: passively finds
   subdomains (crt.sh certificate-transparency logs + DNS resolution, via
   `decrypto_subdomain_scan.py`) and adds up to `--max-subdomains` (default 5, max 15) to the
@@ -135,23 +145,31 @@ OWASP Top 10 2021) from `decrypto_taxonomy.py`, and reports include `findings_by
 Variants covered include CSP weaknesses (missing, `unsafe-inline`, `unsafe-eval`, wildcard
 sources, missing `object-src`/`base-uri`), Referrer-Policy and Permissions-Policy gaps,
 framework version headers, CORS wildcard, twelve sensitive-path kinds (version control,
-environment files, cloud credentials, backups, debug endpoints), and static crypto variants
+environment files, cloud credentials, backups, debug endpoints), static crypto variants
 (ECB mode, deprecated TLS protocols, small RSA keys, low KDF iterations, JWT `none`,
-hardcoded IV/nonce). This is a bounded, passive rule set, not every possible bug class; it
-does not cover injection, XSS, IDOR or logic flaws, which need authorized manual testing.
+hardcoded IV/nonce), and — only when `--enable-active-payloads` is set — SQL injection
+(error-based and time-based blind), reflected XSS, OS command injection (time-based blind)
+and path traversal. This is still a bounded rule set, not every possible bug class; it does
+not cover IDOR, business-logic flaws, stored/DOM-based XSS, authentication/credential
+attacks, or blind SSRF, which need authorized manual testing.
 
-Exploitability verification: header, redirect, sensitive-path and TLS findings carry an optional `exploitability` object. It
-states whether the response data alone proves the mechanism, and what further
-owner-authorized testing is still needed. Status stays UNCONFIRMED until the owner
-validates real-world impact. The tool still sends no injection/XSS/SQLi payloads,
-brute-force, IDOR, or load tests.
+Exploitability verification: header, redirect, sensitive-path, TLS and (when enabled) active
+payload findings carry an optional `exploitability` object. It states whether the response
+data alone proves the mechanism, and what further owner-authorized testing is still needed.
+Status stays UNCONFIRMED until the owner validates real-world impact. Active payload testing
+is strictly opt-in (`--enable-active-payloads` + `--authorized`); by default the tool still
+sends no injection/XSS/SQLi payloads, brute-force, IDOR, or load tests.
 
 Important safety and privacy constraints
 
 - Live HTTP checks are disabled unless you pass `--authorized` and provide
   explicit --url values. Do not run the live scanner against assets you do not
   have permission to test.
-- The tool never follows redirects and does not send exploit payloads.
+- The tool never follows redirects and, by default, sends no exploit payloads.
+  `--enable-active-payloads` is an explicit, separate opt-in (still requiring
+  `--authorized`) that sends only small, non-destructive payloads — timing
+  side effects, an inert marker, or a read of a known non-secret file — never
+  payloads that modify, delete, or exfiltrate real data.
 - The tool does not store response bodies, cookie values, or other secrets. All
   evidence in reports is redacted or limited to non-sensitive metadata.
 

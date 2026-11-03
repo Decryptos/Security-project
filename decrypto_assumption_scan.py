@@ -24,6 +24,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPHandler, HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from decrypto_active_checks import MAX_INJECTION_POINTS, MAX_PAYLOAD_REQUESTS_PER_POINT, active_payload_checks
 from decrypto_taxonomy import classify, summarize
 from decrypto_validation import ORIGINS, evaluate_cors_pair, metadata
 
@@ -745,6 +746,7 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
          delay: float = 1.0, timeout: float = 6.0, openapi: Path | None = None,
          verify_cors: bool = False, check_redirects: bool = False,
          check_sensitive_paths: bool = False, check_tls: bool = False,
+         enable_active_payloads: bool = False, max_injection_points: int = MAX_INJECTION_POINTS,
          max_urls: int = 12) -> dict[str, Any]:
     if len(urls) > max_urls or len(urls) != len(set(urls)):
         raise ValueError(f"Use at most {max_urls} different, explicitly listed URLs per run")
@@ -813,12 +815,29 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
                 time.sleep(delay)
             state["sent"] += 1
             findings.extend(tls_checks(urlsplit(url).hostname, urlsplit(url).port or 443, timeout))
+        if enable_active_payloads:
+            findings.extend(active_payload_checks(opener, state, delay, url, timeout, max_points=max_injection_points))
         sent = state["sent"]
 
     findings.extend(api_findings)
 
     findings.sort(key=lambda f: (f["rule"], f["target"]))
     correlated = correlate_assumptions(findings)
+    not_tested = [
+        "credential/brute-force attacks",
+        "object ID substitution / IDOR",
+        "cross-account data access",
+        "bypassing authentication or access controls",
+        "denial-of-service or load testing",
+        "cryptographic nonce/key-recovery attacks",
+    ]
+    if not enable_active_payloads:
+        not_tested[:0] = [
+            "exploitation",
+            "SQL/command/template injection payloads",
+            "reflected XSS payloads",
+            "path traversal payloads",
+        ]
     return {
         "tool": "Decrypto Assumption-Driven Auditor",
         "version": VERSION,
@@ -830,7 +849,7 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
             "record a contradiction without exploit payloads",
             "correlate compatible contradictions without claiming exploitability",
             "require owner validation before assigning impact",
-        ],
+        ] + (["optionally verify select bug classes with small, non-destructive payloads (opt-in, owner-authorized)"] if enable_active_payloads else []),
         "scope": normalized_urls,
         "total_requests": sent,
         "finding_count": len(findings),
@@ -842,18 +861,10 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
         "paired_cors_verification": paired_verification,
         "errors": errors,
         "openapi_review": api_meta,
-        "not_tested": [
-            "exploitation",
-            "credential attacks",
-            "SQL/command/template injection payloads",
-            "object ID substitution",
-            "data extraction",
-            "cryptographic nonce attacks",
-            "cross-account access",
-            "bypassing access controls",
-            "denial-of-service or load testing",
-        ],
-        "privacy": "No response bodies, credentials, cookie names/values, redirect destinations or session tokens were stored.",
+        "active_payload_testing": enable_active_payloads,
+        "not_tested": not_tested,
+        "privacy": "No response bodies, credentials, cookie names/values, redirect destinations or session tokens were stored, "
+                   "except transient parsing of payload-test responses for marker/signature matching, which is never persisted.",
     }
 
 
@@ -915,7 +926,9 @@ def markdown_report(result: dict[str, Any]) -> str:
                 "",
             ]
         lines += [
-            "**Reproduction scope:** Credential-free HEAD/GET observations (up to two harmless Origin probes), or offline local contract inspection, limited to the explicitly authorized URL. No payloads or sensitive elements were stored.",
+            "**Reproduction scope:** Credential-free HEAD/GET observations (up to two harmless Origin probes), or offline local contract inspection, limited to the explicitly authorized URL."
+            + (" Where active payload testing was enabled, only small, non-destructive payloads were sent to parameters the page itself exposes." if result.get("active_payload_testing") else "")
+            + " No payloads or sensitive elements were stored.",
             "",
         ]
 
@@ -952,7 +965,8 @@ def markdown_report(result: dict[str, Any]) -> str:
         "",
         "Share only findings you independently confirm, using a program-approved disclosure channel. Attach redacted evidence, the affected URL, explicit authorization scope, and the remediation plan.",
         "",
-        "**Limitations:** This tool intentionally does not send attack payloads, test authorization with other users' objects, read response bodies, or confirm browser-based exploitability.",
+        "**Limitations:** This tool intentionally does not test authorization with other users' objects, brute-force credentials, or confirm full browser-based (DOM-based/stored) exploitability."
+        + (" Active payload testing (SQLi/XSS/command-injection/path-traversal) was enabled for this run using small, non-destructive payloads only." if result.get("active_payload_testing") else " It does not send SQL/command/XSS/path-traversal attack payloads unless `--enable-active-payloads` is explicitly set."),
         "",
     ]
     return "\n".join(lines)
@@ -967,6 +981,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check-redirects", action="store_true", help="Probe common redirect parameters for unvalidated open-redirect reflection")
     parser.add_argument("--check-sensitive-paths", action="store_true", help="HEAD-probe a short list of well-known sensitive paths (.git/HEAD, .env, etc.)")
     parser.add_argument("--check-tls", action="store_true", help="Read TLS certificate expiry and negotiated protocol via one handshake per HTTPS URL")
+    parser.add_argument("--enable-active-payloads", action="store_true",
+                         help="Verify SQLi/XSS/command-injection/path-traversal with small, non-destructive payloads "
+                              "(timing or inert markers only) against parameters found in the page's own forms/links. "
+                              "Requires --authorized. Never modifies/deletes data or extracts real content.")
+    parser.add_argument("--max-injection-points", type=int, default=MAX_INJECTION_POINTS,
+                         help="Cap on tested parameters per URL when --enable-active-payloads is set (1-5, default 3)")
     parser.add_argument("--domain", help="Apex domain you are AUTHORIZED to test; discovers subdomains passively (crt.sh + DNS) and adds them to --url")
     parser.add_argument("--max-subdomains", type=int, default=5, help="Cap on subdomains added from --domain (1-15, default 5)")
     parser.add_argument("--openapi", type=Path, help="Optional LOCAL OpenAPI JSON specification to review offline")
@@ -993,6 +1013,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("Provide --url, --domain, or --openapi")
     if urls and not args.authorized:
         parser.error("Web/API tests require --authorized AND permission from the asset owner")
+    if args.enable_active_payloads and not args.authorized:
+        parser.error("--enable-active-payloads requires --authorized AND explicit permission to send test payloads")
+    if not 1 <= args.max_injection_points <= 5:
+        parser.error("--max-injection-points must be between 1 and 5")
 
     max_urls = 15 if args.domain else 12
     per_url_requests = (
@@ -1000,6 +1024,7 @@ def main(argv: list[str] | None = None) -> int:
         + (len(REDIRECT_PARAMS) if args.check_redirects else 0)
         + (len(SENSITIVE_PATHS) if args.check_sensitive_paths else 0)
         + (1 if args.check_tls else 0)
+        + ((1 + args.max_injection_points * MAX_PAYLOAD_REQUESTS_PER_POINT) if args.enable_active_payloads else 0)
     )
     if len(urls) > max_urls:
         parser.error(f"Maximum of {max_urls} URLs per run")
@@ -1009,7 +1034,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = scan(urls, set(args.private_url), cors=args.cors, delay=args.delay, timeout=args.timeout, openapi=args.openapi,
                       verify_cors=args.verify_cors, check_redirects=args.check_redirects,
-                      check_sensitive_paths=args.check_sensitive_paths, check_tls=args.check_tls, max_urls=max_urls)
+                      check_sensitive_paths=args.check_sensitive_paths, check_tls=args.check_tls,
+                      enable_active_payloads=args.enable_active_payloads, max_injection_points=args.max_injection_points,
+                      max_urls=max_urls)
         json_path = args.out.with_suffix(".json")
         md_path = args.out.with_suffix(".md")
         json_path.parent.mkdir(parents=True, exist_ok=True)

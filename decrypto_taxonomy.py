@@ -42,6 +42,12 @@ TAXONOMY: dict[str, tuple[str, str, str, str]] = {
     "SENSITIVE-PATH-EXPOSED": ("information-disclosure", "exposed-file-or-endpoint", "CWE-538", "A05"),
     # Redirects
     "OPEN-REDIRECT": ("redirect", "unvalidated-redirect-parameter", "CWE-601", "A01"),
+    # Active-payload-verified injection classes (opt-in, --enable-active-payloads)
+    "SQLI-ERROR-BASED": ("injection", "sql-injection-error-based", "CWE-89", "A03"),
+    "SQLI-TIME-BLIND": ("injection", "sql-injection-time-blind", "CWE-89", "A03"),
+    "XSS-REFLECTED": ("injection", "cross-site-scripting-reflected", "CWE-79", "A03"),
+    "COMMAND-INJECTION-TIME-BLIND": ("injection", "os-command-injection-time-blind", "CWE-78", "A03"),
+    "PATH-TRAVERSAL": ("injection", "path-traversal-file-disclosure", "CWE-22", "A01"),
     # Static crypto findings
     "CRYPTO-HARDKEY": ("cryptographic-failures", "hardcoded-key-or-secret", "CWE-798", "A02"),
     "CRYPTO-PEM-IN-CODE": ("cryptographic-failures", "private-key-in-repository", "CWE-321", "A02"),
