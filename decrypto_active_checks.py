@@ -8,7 +8,16 @@ links — never guessed parameter names, never another user's data.
 
 Payload safety invariants:
   * SQL/command injection checks use only `sleep`-style timing side effects
-    (never DROP/UPDATE/DELETE, never data extraction via UNION, etc.).
+    (never DROP/UPDATE/DELETE, never data extraction via UNION, etc.). The
+    command-injection check covers common POSIX shell chaining/substitution
+    syntax (`;`, `|`, `&&`, `||`, backticks, `$()`, newline) plus Windows
+    cmd.exe (`ping -n` against loopback only — never an external host, since
+    Windows has no built-in `sleep`) and PowerShell (`Start-Sleep`)
+    equivalents — it never reads, copies, or discloses any file (e.g. it
+    never runs `cat`/`type` against `/etc/shadow` or any other sensitive
+    file: that would be unreliable, since such files are rarely readable by
+    the process a web app runs as, and unsafe, since any content it returned
+    would otherwise end up stored in the JSON/Markdown report).
   * The XSS check uses one inert, tool-generated HTML marker — no <script>
     that calls out anywhere, no cookie theft, no DOM manipulation.
   * The path-traversal check only looks for a signature of a well-known,
@@ -60,10 +69,24 @@ SQLI_TIME_PAYLOADS = (
     f"1' AND SLEEP({TIME_DELAY_SECONDS}) AND '1'='1",
 )
 COMMAND_TIME_PAYLOADS = (
+    # POSIX shell: command separators/chaining/substitution (all non-destructive
+    # — every variant only ever runs `sleep`, which has no side effects).
     f"; sleep {TIME_DELAY_SECONDS} #",
     f"| sleep {TIME_DELAY_SECONDS}",
     f"`sleep {TIME_DELAY_SECONDS}`",
     f"$(sleep {TIME_DELAY_SECONDS})",
+    f"&& sleep {TIME_DELAY_SECONDS}",
+    f"|| sleep {TIME_DELAY_SECONDS}",
+    f"; sleep {TIME_DELAY_SECONDS} ;",
+    f"\nsleep {TIME_DELAY_SECONDS}\n",
+    # Windows cmd.exe has no built-in `sleep`; `ping -n` against loopback only
+    # (never an external host) is the standard non-destructive timing proxy.
+    f"& ping -n {TIME_DELAY_SECONDS + 1} 127.0.0.1 & ",
+    f"| ping -n {TIME_DELAY_SECONDS + 1} 127.0.0.1",
+    f"&& ping -n {TIME_DELAY_SECONDS + 1} 127.0.0.1",
+    # PowerShell
+    f"; Start-Sleep -Seconds {TIME_DELAY_SECONDS}",
+    f"| Start-Sleep -Seconds {TIME_DELAY_SECONDS}",
 )
 PATH_TRAVERSAL_PAYLOADS = (
     "../../../../../../etc/passwd",

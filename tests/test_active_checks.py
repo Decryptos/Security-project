@@ -70,6 +70,16 @@ class _VulnerableHandler(http.server.BaseHTTPRequestHandler):
             self._write(f"you said: {params.get('msg', '')}")
             return
 
+        if parsed.path == "/exec":
+            # Simulates an app context where only a Windows/cmd.exe-style
+            # injection is recognized (no literal "sleep"), to prove the
+            # scanner's loop detects variants beyond the first in the list.
+            cmd = params.get("cmd", "")
+            if "ping -n" in cmd.lower():
+                time.sleep(3.2)
+            self._write(f"cmd={cmd}")
+            return
+
         self._write("not found", 404)
 
     def log_message(self, *args):
@@ -109,6 +119,17 @@ class TestActiveChecksVulnerable(unittest.TestCase):
         state = {"sent": 0}
         point = {"kind": "form", "target_url": f"{self.base_url}lookup", "method": "get",
                  "param": "file", "baseline_fields": {"file": "1", "csrf": "tok"}}
+        findings = active_mod.command_injection_checks(opener, state, 0.05, point, timeout=6)
+        self.assertEqual([f["rule"] for f in findings], ["COMMAND-INJECTION-TIME-BLIND"])
+
+    def test_command_injection_detects_windows_style_variant(self):
+        # /exec only reacts to "ping -n" (no literal "sleep"), proving the
+        # scanner tries every shell-chaining/cross-platform variant in
+        # COMMAND_TIME_PAYLOADS, not just the first POSIX `sleep` payload.
+        opener = self._opener()
+        state = {"sent": 0}
+        point = {"kind": "query", "target_url": f"{self.base_url}exec", "method": "get",
+                 "param": "cmd", "baseline_fields": {"cmd": "1"}}
         findings = active_mod.command_injection_checks(opener, state, 0.05, point, timeout=6)
         self.assertEqual([f["rule"] for f in findings], ["COMMAND-INJECTION-TIME-BLIND"])
 
@@ -170,6 +191,30 @@ class TestCliGating(unittest.TestCase):
     def test_enable_active_payloads_requires_authorized(self):
         with self.assertRaises(SystemExit):
             scan_mod.main(["--url", "https://example.invalid/", "--enable-active-payloads"])
+
+
+class TestCommandPayloadSafety(unittest.TestCase):
+    """Pure content checks (no network) over the payload table itself."""
+
+    def test_covers_posix_chaining_and_cross_platform_variants(self):
+        joined = " ".join(active_mod.COMMAND_TIME_PAYLOADS).lower()
+        for marker in ("&&", "||", ";", "|", "`", "$(", "\n", "ping -n", "start-sleep"):
+            self.assertIn(marker, joined)
+
+    def test_never_includes_a_sensitive_file_read_payload(self):
+        # Every variant must stay a non-destructive timing probe (`sleep` /
+        # `ping` / `Start-Sleep`). Reading a real file — especially a secrets
+        # file such as /etc/shadow — is unreliable (web processes rarely run
+        # as root) and unsafe (any content returned would land in stored
+        # evidence), so it must never appear here.
+        joined = " ".join(active_mod.COMMAND_TIME_PAYLOADS).lower()
+        for forbidden in ("shadow", "passwd", "cat ", "type ", "/etc/", "c:\\"):
+            self.assertNotIn(forbidden, joined)
+
+    def test_loopback_only_for_ping_based_payloads(self):
+        for payload in active_mod.COMMAND_TIME_PAYLOADS:
+            if "ping" in payload.lower():
+                self.assertIn("127.0.0.1", payload)
 
 
 if __name__ == "__main__":

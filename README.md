@@ -126,10 +126,15 @@ Live HTTP/OpenAPI checks (assumption-driven)
 - `--enable-active-payloads` (opt-in, requires `--authorized`): sends small, **non-destructive**
   payloads to parameters the target page itself exposes in its own forms/links (never guessed
   names) to verify SQL injection (error-based + time-based blind), reflected XSS (inert marker),
-  OS command injection (time-based blind) and path traversal (known-file signature match).
-  Payloads use only `sleep`-style timing side effects, an inert HTML marker, or a read of a
-  well-known non-secret OS file — never `DROP`/`UPDATE`/`DELETE`, data extraction, or a live
-  `<script>` callback. `--max-injection-points` (default 3, max 5) caps parameters tested per
+  OS command injection (time-based blind across POSIX shell `;`/`|`/`&&`/`||`/backticks/`$()`/
+  newline chaining, Windows `ping -n` against loopback only, and PowerShell `Start-Sleep`) and
+  path traversal (known-file signature match).
+  Payloads use only `sleep`/`ping`/`Start-Sleep`-style timing side effects, an inert HTML marker,
+  or a read of a well-known non-secret OS file — never `DROP`/`UPDATE`/`DELETE`, data extraction,
+  a live `<script>` callback, or a read of a sensitive file (e.g. it will never attempt to read
+  `/etc/shadow`: that file requires root, which a web process rarely has, so such a payload
+  would mostly just fail silently, and any content it did return would otherwise land in the
+  stored report). `--max-injection-points` (default 3, max 5) caps parameters tested per
   URL. Confirmed findings still keep `status: UNCONFIRMED` but set
   `exploitability.directly_verifiable: true` with the specific evidence (timing delta, error
   signature, marker reflection, or file signature).
@@ -143,7 +148,7 @@ Live HTTP/OpenAPI checks (assumption-driven)
   `--check-sensitive-paths` and `--check-tls` on every discovered host (pass
   `--domain-minimal-checks` to opt out and run only the always-on baseline checks).
   `--enable-active-payloads` stays a separate, explicit opt-in even for domain-wide
-  sweeps. The request budget scales with scope: up to 6,000 requests for `--domain` runs
+  sweeps. The request budget scales with scope: up to 9,000 requests for `--domain` runs
   vs. 250 for `--url`-only runs; discovery itself never contacts the candidate subdomains,
   only DNS and crt.sh. Reports include a "Domain-wide subdomain scope" section showing
   candidates found, exclusions, and anything truncated by the safety ceiling.
@@ -307,7 +312,7 @@ specific hosts from scope, and a `--domain` run automatically turns on
 `--cors`, `--check-redirects`, `--check-sensitive-paths` and `--check-tls`
 for every discovered host unless `--domain-minimal-checks` is passed.
 `--enable-active-payloads` remains a separate, explicit opt-in regardless of
-scope size. The per-run request budget scales to 6,000 for `--domain` scans
+scope size. The per-run request budget scales to 9,000 for `--domain` scans
 (vs. 250 for `--url`-only runs) to accommodate fanning out across many
 authorized hosts; `discover_authorized_subdomains_report()` in
 `decrypto_subdomain_scan.py` exposes discovery/exclusion metadata (candidates
@@ -324,4 +329,17 @@ for both years. The mapping from 2021 to 2025 codes lives in
 
 All of this still assumes explicit authorization: `--domain` requires
 `--authorized` and permission from the domain owner, exactly like `--url`.
+
+The OS command-injection check (`COMMAND-INJECTION-TIME-BLIND`) now tries a
+broader set of shell-chaining/substitution syntaxes per injection point:
+POSIX `;`, `|`, `&&`, `||`, backticks, `$()` and newline, Windows cmd.exe
+`ping -n` against loopback only (Windows has no built-in `sleep`), and
+PowerShell `Start-Sleep`. Every variant stays a pure timing probe; it never
+reads, copies, or discloses a file. In particular it will never attempt to
+read `/etc/shadow` or any other sensitive file — such a payload would mostly
+fail silently (that file requires root, which a web process rarely has) and,
+if it ever did succeed, the content it returned would otherwise end up
+stored in the JSON/Markdown report, which this tool's redaction policy does
+not allow. `MAX_PAYLOAD_REQUESTS_PER_POINT` (and therefore
+`MAX_REQUESTS_PER_DOMAIN_RUN`, now 9,000) grew accordingly.
 

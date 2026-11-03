@@ -53,8 +53,12 @@ METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
 # Safety ceilings on total HTTP requests sent in one CLI run. A --domain sweep
 # needs a much larger budget because it intentionally fans out to many
 # authorized hosts at once; --url-only runs keep the original, tighter cap.
+# 9000 keeps headroom above the worst case for a full 100-subdomain sweep with
+# every safe check plus --enable-active-payloads at its default
+# --max-injection-points (3): 100 * (2 cors + 3 redirect-params + 12
+# sensitive-paths + 1 tls + (1 + 3 * MAX_PAYLOAD_REQUESTS_PER_POINT)) ≈ 8200.
 MAX_REQUESTS_PER_RUN = 250
-MAX_REQUESTS_PER_DOMAIN_RUN = 6000
+MAX_REQUESTS_PER_DOMAIN_RUN = 9000
 
 
 class NoRedirect(HTTPRedirectHandler):
