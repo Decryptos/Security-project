@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Decrypto — assumption-driven security checks + responsible disclosure report.
 
-One-file, Python 3.9+ stdlib, read-only, explicitly scoped website/API auditor.
+Python 3.9+ stdlib, read-only, explicitly scoped website/API auditor.
 Reports falsifiable *leads*, not confirmed exploits.
 """
 
@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import http.client
 import json
+import math
 import re
 import socket
 import ssl
@@ -23,10 +24,10 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPHandler, HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from decrypto_validation import ORIGINS, evaluate_cors_pair, metadata
 
 VERSION = "1.3"
 MARKER_ORIGIN = "https://audit-origin.invalid"
-MARKER_ORIGIN_2 = "https://audit-origin-2.invalid"
 REDIRECT_MARKER = "https://audit-redirect.invalid/"
 REDIRECT_PARAMS = ("redirect", "return", "next")
 SENSITIVE_PATHS = ("/.git/HEAD", "/.env", "/.aws/credentials", "/wp-config.php.bak")
@@ -105,6 +106,35 @@ def new_finding(rule: str, url: str, title: str, assumption: str,
     return finding
 
 
+
+
+
+def directives(headers: Message, name: str) -> dict[str, str]:
+    """Parse exact directive tokens across repeated fields; retain no raw values."""
+    return {part.partition("=")[0].strip().lower(): part.partition("=")[2].strip().strip('"')
+            for value in headers.get_all(name, []) for part in value.split(",")}
+
+
+def shared_cache(headers: Message) -> bool:
+    cache = directives(headers, "Cache-Control")
+    if any(key in cache for key in ("no-store", "private", "no-cache")):
+        return False
+    age = cache.get("s-maxage")
+    return (age.isascii() and age.isdigit() and bool(age.strip("0"))) if age is not None else "public" in cache
+
+
+def hsts_state(headers: Message) -> str:
+    values = headers.get_all("Strict-Transport-Security", [])
+    if not values:
+        return "absent"
+    # Browsers process the first field only. Duplicate max-age is invalid.
+    ages = [part.partition("=")[2].strip().strip('"') for part in values[0].split(";")
+            if part.partition("=")[0].strip().lower() == "max-age"]
+    if len(ages) != 1 or not ages[0].isascii() or not ages[0].isdigit():
+        return "invalid"
+    return "disabled" if not ages[0].strip("0") else "enabled"
+
+
 def cookie_metadata(headers: Message) -> list[dict[str, Any]]:
     """Never save cookie names or values; only inspect session-like names in memory."""
     data: list[dict[str, Any]] = []
@@ -113,12 +143,15 @@ def cookie_metadata(headers: Message) -> list[dict[str, Any]]:
         if not sections or "=" not in sections[0]:
             continue
         name = sections[0].split("=", 1)[0]
-        attrs = {x.split("=", 1)[0].lower().strip() for x in sections[1:]}
+        attrs = {x.partition("=")[0].lower().strip(): x.partition("=")[2].strip() for x in sections[1:]}
+        same = attrs.get("samesite", "").lower()
         data.append({
             "session_like": bool(SESSION_NAME.search(name)),
             "secure": "secure" in attrs,
             "httponly": "httponly" in attrs,
-            "samesite": "samesite" in attrs,
+            "samesite": same in {"lax", "strict", "none"},
+            "none_without_secure": same == "none" and "secure" not in attrs,
+            "prefix_invalid": (name.startswith("__Secure-") and "secure" not in attrs) or (name.startswith("__Host-") and ("secure" not in attrs or "domain" in attrs or attrs.get("path") != "/")),
         })
     return data
 
@@ -139,7 +172,7 @@ def has_auth_indicators(headers: Message) -> bool:
 
 
 def send(opener, url: str, method: str, origin: str | None, timeout: float):
-    headers = {"User-Agent": "Decrypto-Assumption-Audit/1.2 (read-only; authorized)", "Accept": "*/*"}
+    headers = {"User-Agent": "Decrypto-Assumption-Audit/1.3 (read-only; authorized)", "Accept": "*/*"}
     if origin:
         headers["Origin"] = origin
     request = Request(url, method=method, headers=headers)
@@ -153,32 +186,18 @@ def send(opener, url: str, method: str, origin: str | None, timeout: float):
             err.close()
 
 
-def _throttled_send(opener, state: dict[str, int], delay: float, url: str, method: str,
-                     origin: str | None, timeout: float):
-    """Send one request, sleeping `delay` seconds before every request after the first.
-
-    `state["sent"]` is shared across every check in a single `scan()` run so the
-    rate limit applies to the whole run, not just one check's own requests.
-    """
-    if state["sent"]:
-        time.sleep(delay)
-    state["sent"] += 1
-    return send(opener, url, method, origin, timeout)
-
-
 def observe(url: str, status: int, headers: Message, private: bool) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     scheme = urlsplit(url).scheme
-    cache = (headers.get("Cache-Control") or "").lower()
     cookies = cookie_metadata(headers)
 
-    if scheme == "https" and status < 400 and not headers.get("Strict-Transport-Security"):
+    if scheme == "https" and status < 400 and hsts_state(headers) != "enabled":
         findings.append(new_finding(
             "TLS-HSTS",
             url,
-            "HSTS not observed",
+            "HSTS absent, disabled or invalid",
             "HTTPS deployment should consistently enforce upgrade to HTTPS.",
-            {"status": status, "strict_transport_security": "absent"},
+            {"status": status, "strict_transport_security": hsts_state(headers)},
             "Compared the expected HTTPS transport invariant to the actual response header.",
             "Publish an appropriate Strict-Transport-Security policy on the relevant HTTPS host; test subdomain impact first.",
             "Confirm any inherited or gateway-applied HSTS policy; absence alone is a hardening lead.",
@@ -186,14 +205,18 @@ def observe(url: str, status: int, headers: Message, private: bool) -> list[dict
         ))
 
     for idx, cookie in enumerate(cookies, 1):
-        if not cookie["session_like"]:
+        if not cookie["session_like"] and not cookie["prefix_invalid"]:
             continue
-        missing = [k for k in ("secure", "httponly", "samesite") if not cookie[k]]
+        missing = [k for k in ("secure", "httponly", "samesite") if not cookie[k]] if cookie["session_like"] else []
+        if cookie["none_without_secure"]:
+            missing.append("samesite_none_requires_secure")
+        if cookie["prefix_invalid"]:
+            missing.append("cookie_prefix_requirements")
         if missing:
             findings.append(new_finding(
                 f"SESSION-COOKIE-{idx}",
                 url,
-                "Session-like cookie missing protective attributes",
+                "Cookie protection or prefix configuration needs review",
                 "Session authentication state should have purpose-appropriate browser boundaries.",
                 {"status": status, "cookie_index": idx, "missing_flags": missing},
                 "Recognized a session-like cookie by name, then tested browser-boundary attributes without recording its name or value.",
@@ -215,14 +238,14 @@ def observe(url: str, status: int, headers: Message, private: bool) -> list[dict
             "review",
         ))
 
-    if private and 200 <= status < 300 and has_auth_indicators(headers) and ("public" in cache or "s-maxage" in cache):
+    if private and 200 <= status < 300 and shared_cache(headers):
         findings.append(new_finding(
             "PRIVATE-CACHE",
             url,
             "Potential shared-cache policy conflict on protected endpoint",
             "Protected, identity-dependent responses should not be stored in shared caches.",
-            {"observed_status": status, "cache_control": cache[:140]},
-            "Compared the declared private endpoint assumption to an observed shared-cache directive on a response that also showed auth-sensitive behavior.",
+            {"observed_status": status, "shared_cache_enabled": True},
+            "Compared the declared private endpoint assumption to an observed shared-cache directive on the owner-declared private response.",
             "For private responses, use Cache-Control: private, no-store as appropriate and configure the CDN cache key correctly.",
             "Inspect gateway/cache configuration with the owner; this does not demonstrate exposure to another user.",
             "review",
@@ -231,68 +254,53 @@ def observe(url: str, status: int, headers: Message, private: bool) -> list[dict
     return findings
 
 
-def cors_checks(url: str, probes: list[tuple[int, Message, str]]) -> list[dict[str, Any]]:
-    """Evaluate one or more credential-free GET probes, each with a distinct untrusted Origin.
-
-    When two independently-generated, unrelated marker origins are BOTH reflected
-    with credentials allowed, that is sufficient evidence — from response data
-    alone — to confirm arbitrary-origin reflection rather than an explicit
-    allowlist coincidentally matching one marker. No attack payload is sent.
-    """
+def cors_checks(url: str, status: int, headers: Message) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
-    reflected_credentialed_origins: set[str] = set()
-    cache_finding_added = False
+    allow = (headers.get("Access-Control-Allow-Origin") or "").strip()
+    creds = (headers.get("Access-Control-Allow-Credentials") or "").strip()
+    if len(headers.get_all("Access-Control-Allow-Origin", [])) != 1 or len(headers.get_all("Access-Control-Allow-Credentials", [])) > 1:
+        return findings
 
-    for status, headers, origin in probes:
-        allow = (headers.get("Access-Control-Allow-Origin") or "").strip()
-        creds = (headers.get("Access-Control-Allow-Credentials") or "").strip().lower()
-        vary = (headers.get("Vary") or "").strip().lower()
-        cache = (headers.get("Cache-Control") or "").strip().lower()
-
-        if allow == origin and creds == "true":
-            reflected_credentialed_origins.add(origin)
-
-        if (allow == origin and "origin" not in [x.strip() for x in vary.split(",")]
-                and ("public" in cache or "s-maxage" in cache) and not cache_finding_added):
-            cache_finding_added = True
-            findings.append(new_finding(
-                "CORS-CACHE",
-                url,
-                "Origin-dependent policy may not be represented in cache key",
-                "Caching should not reuse an Origin-specific access policy across unrelated origins.",
-                {"status": status, "origin_reflected": True, "vary_origin": False, "cache_control": cache[:140]},
-                "Compared the observed Origin-specific CORS policy to shared caching and Vary behavior.",
-                "Set Vary: Origin where appropriate and configure CDN cache keys to reflect origin-sensitive responses.",
-                "Confirm the route is actually shared-cached; no poisoning or cross-user test was performed.",
-                "review",
-            ))
-
-    if reflected_credentialed_origins:
-        confirmed_arbitrary = len(reflected_credentialed_origins) >= 2
+    if allow == MARKER_ORIGIN and creds == "true":
         findings.append(new_finding(
             "CORS-TRUST",
             url,
             "Arbitrary test Origin reflected with credential permission",
             "Cross-origin trust should be restricted to independently approved origins.",
-            {"reflected_test_origin_count": len(reflected_credentialed_origins), "access_control_allow_credentials": True},
-            "Compared the response to innocuous, unrelated, untrusted Origin headers and observed credentialed reflection.",
+            {"status": status, "reflected_test_origin": True, "access_control_allow_credentials": True},
+            "Compared the response to an innocuous, untrusted Origin header and observed credentialed reflection.",
             "Use an exact allowlist of trusted origins; avoid credentialed reflection of arbitrary origins; set Vary: Origin if dynamically varying.",
-            ("None further needed for the reflection mechanism itself — validate only end-to-end impact "
-             "(e.g., with an authorized test account) before reporting real-world severity.") if confirmed_arbitrary else
-            "Send one more distinct, unrelated Origin to rule out an explicit allowlist entry coincidentally matching the marker.",
+            "Validate in an authorized browser with a test account. SameSite cookies, browser rules and response sensitivity determine exploitability.",
             "review",
-            exploitability={
-                "directly_verifiable": confirmed_arbitrary,
-                "method": "multi_origin_reflection" if confirmed_arbitrary else "single_origin_reflection",
-                "requires_additional_testing": (
-                    "No — two independent, unrelated origins were both reflected with credentials allowed"
-                    if confirmed_arbitrary else
-                    "Yes — only one origin was tested; confirm with a second distinct Origin value"
-                ),
-            },
+        ))
+
+    if allow == MARKER_ORIGIN and not {"origin", "*"}.intersection(directives(headers, "Vary")) and shared_cache(headers):
+        findings.append(new_finding(
+            "CORS-CACHE",
+            url,
+            "Origin-dependent policy may not be represented in cache key",
+            "Caching should not reuse an Origin-specific access policy across unrelated origins.",
+            {"status": status, "origin_reflected": True, "vary_origin": False, "shared_cache_enabled": True},
+            "Compared the observed Origin-specific CORS policy to shared caching and Vary behavior.",
+            "Set Vary: Origin where appropriate and configure CDN cache keys to reflect origin-sensitive responses.",
+            "Confirm the route is actually shared-cached; no poisoning or cross-user test was performed.",
+            "review",
         ))
 
     return findings
+
+
+def _throttled_send(opener, state: dict[str, int], delay: float, url: str, method: str,
+                     origin: str | None, timeout: float):
+    """Send one request, sleeping `delay` seconds before every request after the first.
+
+    `state["sent"]` is shared across every check in a single `scan()` run so the
+    rate limit applies to the whole run, not just one check's own requests.
+    """
+    if state["sent"]:
+        time.sleep(delay)
+    state["sent"] += 1
+    return send(opener, url, method, origin, timeout)
 
 
 def security_header_checks(url: str, status: int, headers: Message) -> list[dict[str, Any]]:
@@ -506,7 +514,17 @@ def inspect_openapi(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any] | 
     if not isinstance(spec, dict) or not (spec.get("openapi") or spec.get("swagger")):
         raise ValueError("Expected OpenAPI/Swagger JSON")
 
-    schemes = (spec.get("components") or {}).get("securitySchemes") or spec.get("securityDefinitions") or {}
+    components = spec.get("components") or {}
+    if not isinstance(components, dict):
+        raise ValueError("OpenAPI components must be an object")
+    schemes = components.get("securitySchemes") or spec.get("securityDefinitions") or {}
+    if not isinstance(schemes, dict) or not isinstance(spec.get("paths", {}), dict):
+        raise ValueError("OpenAPI schemes and paths must be objects")
+    for security in [spec.get("security", [])] + [op.get("security", [])
+            for item in spec.get("paths", {}).values() if isinstance(item, dict)
+            for verb, op in item.items() if verb.lower() in METHODS and isinstance(op, dict)]:
+        if not isinstance(security, list) or any(not isinstance(req, dict) for req in security):
+            raise ValueError("OpenAPI security must be an array of requirement objects")
     findings: list[dict[str, Any]] = []
     for name, scheme in schemes.items():
         if not isinstance(scheme, dict):
@@ -533,10 +551,12 @@ def inspect_openapi(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any] | 
             if verb.lower() not in METHODS or not isinstance(operation, dict):
                 continue
             operations += 1
+            if "$ref" in operation or "$ref" in methods:
+                continue  # Unresolved references are not evidence of absent security.
             if verb.lower() not in {"post", "put", "patch", "delete"}:
                 continue
             effective = operation.get("security", spec.get("security"))
-            if schemes and (effective is None or effective == []):
+            if schemes and (effective is None or effective == [] or (isinstance(effective, list) and {} in effective)):
                 label = f"{path.name}:{verb.upper()} {path_str}"
                 findings.append(new_finding(
                     "OAS-WRITE-NO-AUTH",
@@ -604,8 +624,9 @@ def correlate_assumptions(findings: list[dict[str, Any]]) -> list[dict[str, Any]
 
 def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
          delay: float = 1.0, timeout: float = 6.0, openapi: Path | None = None,
-         check_redirects: bool = False, check_sensitive_paths: bool = False,
-         check_tls: bool = False, max_urls: int = 12) -> dict[str, Any]:
+         verify_cors: bool = False, check_redirects: bool = False,
+         check_sensitive_paths: bool = False, check_tls: bool = False,
+         max_urls: int = 12) -> dict[str, Any]:
     if len(urls) > max_urls or len(urls) != len(set(urls)):
         raise ValueError(f"Use at most {max_urls} different, explicitly listed URLs per run")
 
@@ -617,106 +638,101 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
             seen.add(canonical)
             normalized_urls.append(canonical)
 
+    if verify_cors and len(normalized_urls) > 8:
+        raise ValueError("Paired CORS verification is limited to 8 URLs and 24 total requests")
     normalized_private_urls = {validate_url(u) for u in private_urls}
     if not normalized_private_urls.issubset(set(normalized_urls)):
         raise ValueError("Every --private-url must be included in --url")
 
-    if delay < 0.5 or timeout < 1 or timeout > 20:
+    if not math.isfinite(delay) or not math.isfinite(timeout) or delay < 0.5 or timeout < 1 or timeout > 20:
         raise ValueError("Minimum 0.5s delay; timeout must be between 1 and 20 seconds")
 
+    api_findings, api_meta = inspect_openapi(openapi) if openapi else ([], None)
     opener = build_opener(NoRedirect(), HTTPHandler(), HTTPSHandler(context=ssl.create_default_context()), ProxyHandler({}))
     findings: list[dict[str, Any]] = []
     observations: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
-    state = {"sent": 0}
+    sent = 0
+    paired_verification: list[dict[str, Any]] = []
 
     for url in normalized_urls:
-        is_private = url in normalized_private_urls
-        method = "GET" if is_private else "HEAD"
-        try:
-            status, headers = _throttled_send(opener, state, delay, url, method, None, timeout)
-        except (HTTPError, URLError, TimeoutError, ssl.SSLError, OSError, ValueError, http.client.HTTPException) as exc:
-            errors.append({"url": url, "method": method, "error_type": type(exc).__name__})
-            continue
-        observations.append({
-            "url": url,
-            "method": method,
-            "status": status,
-            "cors_probe": False,
-            "redirect_not_followed": 300 <= status < 400,
-        })
-        findings.extend(observe(url, status, headers, is_private))
-        findings.extend(security_header_checks(url, status, headers))
+        pair_samples: list[dict[str, Any]] = []
+        for method, origin in [("GET" if url in normalized_private_urls else "HEAD", None)] + ([("GET", MARKER_ORIGIN)] if cors or verify_cors else []) + ([("GET", ORIGINS[1])] if verify_cors else []):
+            if sent:
+                time.sleep(delay)
+            sent += 1
+            try:
+                status, headers = send(opener, url, method, origin, timeout)
+            except (HTTPError, URLError, TimeoutError, ssl.SSLError, OSError, ValueError, http.client.HTTPException) as exc:
+                errors.append({"url": url, "method": method, "error_type": type(exc).__name__})
+                continue
+            observations.append({
+                "url": url,
+                "method": method,
+                "status": status,
+                "cors_probe": bool(origin),
+                "redirect_not_followed": 300 <= status < 400,
+            })
+            if origin:
+                if verify_cors:
+                    pair_samples.append(metadata(origin, status, headers))
+                if origin == MARKER_ORIGIN:
+                    findings.extend(cors_checks(url, status, headers))
+            else:
+                findings.extend(observe(url, status, headers, url in normalized_private_urls))
+                findings.extend(security_header_checks(url, status, headers))
+        if verify_cors:
+            paired_verification.append(evaluate_cors_pair(url, pair_samples))
 
-        if cors:
-            probes: list[tuple[int, Message, str]] = []
-            for marker_origin in (MARKER_ORIGIN, MARKER_ORIGIN_2):
-                try:
-                    cors_status, cors_headers = _throttled_send(opener, state, delay, url, "GET", marker_origin, timeout)
-                except (HTTPError, URLError, TimeoutError, ssl.SSLError, OSError, http.client.HTTPException) as exc:
-                    errors.append({"url": url, "method": "GET", "error_type": type(exc).__name__})
-                    continue
-                observations.append({
-                    "url": url,
-                    "method": "GET",
-                    "status": cors_status,
-                    "cors_probe": True,
-                    "redirect_not_followed": 300 <= cors_status < 400,
-                })
-                probes.append((cors_status, cors_headers, marker_origin))
-            findings.extend(cors_checks(url, probes))
-
+        state = {"sent": sent}
         if check_redirects:
             findings.extend(open_redirect_checks(opener, state, delay, url, timeout))
-
         if check_sensitive_paths:
             findings.extend(sensitive_path_checks(opener, state, delay, url, timeout))
-
         if check_tls and urlsplit(url).scheme == "https":
             if state["sent"]:
                 time.sleep(delay)
             state["sent"] += 1
             findings.extend(tls_checks(urlsplit(url).hostname, urlsplit(url).port or 443, timeout))
+        sent = state["sent"]
 
-    api_meta = None
-    if openapi:
-        extra, api_meta = inspect_openapi(openapi)
-        findings.extend(extra)
+    findings.extend(api_findings)
 
     findings.sort(key=lambda f: (f["rule"], f["target"]))
     correlated = correlate_assumptions(findings)
-    not_tested = [
-        "SQL/command/template injection payloads",
-        "credential attacks (brute force, credential stuffing)",
-        "object ID substitution / IDOR data extraction",
-        "cryptographic nonce or padding-oracle attacks",
-        "cross-account access with real user data",
-        "bypassing access controls with crafted tokens",
-        "denial-of-service or load testing",
-    ]
     return {
         "tool": "Decrypto Assumption-Driven Auditor",
         "version": VERSION,
         "date_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "status": "Security leads only — not verified vulnerabilities, except where `exploitability.directly_verifiable` is true",
+        "status": "Security leads only — not verified vulnerabilities",
         "method": [
             "state a falsifiable security assumption",
             "observe the relevant trust boundary or implementation contract",
             "record a contradiction without exploit payloads",
-            "where response data alone proves the mechanism (e.g., two-origin CORS reflection, TLS handshake metadata), mark exploitability.directly_verifiable=true",
-            "correlate compatible contradictions without claiming real-world impact",
-            "require owner validation before assigning impact, even for directly-verifiable findings",
+            "correlate compatible contradictions without claiming exploitability",
+            "require owner validation before assigning impact",
         ],
         "scope": normalized_urls,
-        "total_requests": state["sent"],
+        "total_requests": sent,
         "finding_count": len(findings),
         "findings": findings,
         "correlated_assumption_hypotheses": correlated,
         "correlated_hypothesis_count": len(correlated),
         "observations": observations,
+        "paired_cors_verification": paired_verification,
         "errors": errors,
         "openapi_review": api_meta,
-        "not_tested": not_tested,
+        "not_tested": [
+            "exploitation",
+            "credential attacks",
+            "SQL/command/template injection payloads",
+            "object ID substitution",
+            "data extraction",
+            "cryptographic nonce attacks",
+            "cross-account access",
+            "bypassing access controls",
+            "denial-of-service or load testing",
+        ],
         "privacy": "No response bodies, credentials, cookie names/values, redirect destinations or session tokens were stored.",
     }
 
@@ -779,7 +795,7 @@ def markdown_report(result: dict[str, Any]) -> str:
                 "",
             ]
         lines += [
-            "**Reproduction scope:** A single non-authenticated HEAD/GET request (and optionally one harmless Origin probe), limited to the explicitly authorized URL. No payloads or sensitive elements were stored.",
+            "**Reproduction scope:** Credential-free HEAD/GET observations (up to two harmless Origin probes), or offline local contract inspection, limited to the explicitly authorized URL. No payloads or sensitive elements were stored.",
             "",
         ]
 
@@ -824,12 +840,13 @@ def markdown_report(result: dict[str, Any]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Decrypto assumption-driven site/API review — authorized targets only")
-    parser.add_argument("--url", action="append", default=[], help="Exact authorized HTTP(S) URL; repeat for more URLs")
+    parser.add_argument("--url", action="append", default=[], help="Exact authorized HTTP(S) URL; repeat for more URLs (max 12)")
     parser.add_argument("--private-url", action="append", default=[], help="One of --url values that should deny anonymous GET")
-    parser.add_argument("--cors", action="store_true", help="Add two credential-free GETs per URL with distinct innocuous Origins to verify arbitrary-origin reflection")
+    parser.add_argument("--cors", action="store_true", help="Add one credential-free GET per URL with innocuous Origin")
+    parser.add_argument("--verify-cors", action="store_true", help="Compare two credential-free Origin probes; never proves exploitability")
     parser.add_argument("--check-redirects", action="store_true", help="Probe common redirect parameters for unvalidated open-redirect reflection")
     parser.add_argument("--check-sensitive-paths", action="store_true", help="HEAD-probe a short list of well-known sensitive paths (.git/HEAD, .env, etc.)")
-    parser.add_argument("--check-tls", action="store_true", help="Read TLS certificate expiry and negotiated protocol version via one handshake per HTTPS URL")
+    parser.add_argument("--check-tls", action="store_true", help="Read TLS certificate expiry and negotiated protocol via one handshake per HTTPS URL")
     parser.add_argument("--domain", help="Apex domain you are AUTHORIZED to test; discovers subdomains passively (crt.sh + DNS) and adds them to --url")
     parser.add_argument("--max-subdomains", type=int, default=5, help="Cap on subdomains added from --domain (1-15, default 5)")
     parser.add_argument("--openapi", type=Path, help="Optional LOCAL OpenAPI JSON specification to review offline")
@@ -850,7 +867,6 @@ def main(argv: list[str] | None = None) -> int:
             discovered = discover_authorized_subdomains(args.domain, max_subdomains=args.max_subdomains)
         except (ValueError, RuntimeError) as exc:
             parser.error(f"Subdomain discovery failed: {exc}")
-            return 2
         urls.extend(u for u in discovered if u not in urls)
 
     if not urls and not args.openapi:
@@ -860,8 +876,7 @@ def main(argv: list[str] | None = None) -> int:
 
     max_urls = 15 if args.domain else 12
     per_url_requests = (
-        1
-        + (2 if args.cors else 0)
+        (3 if args.verify_cors else 2 if args.cors else 1)
         + (len(REDIRECT_PARAMS) if args.check_redirects else 0)
         + (len(SENSITIVE_PATHS) if args.check_sensitive_paths else 0)
         + (1 if args.check_tls else 0)
@@ -872,11 +887,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"Maximum of {max_urls * 11} requests per run with the selected checks; reduce URLs or disable some --check-* flags")
 
     try:
-        result = scan(
-            urls, set(args.private_url), cors=args.cors, delay=args.delay, timeout=args.timeout, openapi=args.openapi,
-            check_redirects=args.check_redirects, check_sensitive_paths=args.check_sensitive_paths,
-            check_tls=args.check_tls, max_urls=max_urls,
-        )
+        result = scan(urls, set(args.private_url), cors=args.cors, delay=args.delay, timeout=args.timeout, openapi=args.openapi,
+                      verify_cors=args.verify_cors, check_redirects=args.check_redirects,
+                      check_sensitive_paths=args.check_sensitive_paths, check_tls=args.check_tls, max_urls=max_urls)
         json_path = args.out.with_suffix(".json")
         md_path = args.out.with_suffix(".md")
         json_path.parent.mkdir(parents=True, exist_ok=True)

@@ -48,6 +48,7 @@ include but are not limited to:
 - TLS verification bypass (verify=False, _create_unverified_context)
 - PBKDF2 usage (flagged for manual verification of iterations and salt)
 - Potential "rolling-your-own" use of low-level cipher APIs
+- Python AST leads for syntactically fixed AES-GCM / ChaCha20-Poly1305 encryption nonces (no secret values recorded)
 
 Python secure crypto examples
 
@@ -59,14 +60,63 @@ trusted patterns instead of insecure JavaScript equivalents:
 - `hmac.compare_digest()` for constant-time comparison
 - Explicit hashing/HMAC examples that avoid unsafe defaults
 
+## Paired CORS verification (authorized websites only)
+
+For explicit permissioned URLs, use `--verify-cors` to compare two benign,
+credential-free GET requests with different Origin values. This is a bounded,
+read-only **policy consistency** check, not an exploitation test or proof of
+cross-account access. Up to eight URLs (24 requests) can be checked per run.
+
+```bash
+python3 decrypto_assumption_scan.py --url https://your-authorized-domain.example/ \\
+  --authorized --verify-cors --out cors_verification
+```
+
+Review the `paired_cors_verification` entries in the JSON report. A positive
+result only establishes reflected response headers for the two observations;
+actual sensitive data exposure, authentication and browser behavior require
+separately authorized validation using owner-controlled test resources.
+
+## Website testing quick start
+
+The live auditor is already implemented in `decrypto_assumption_scan.py`. Run it locally
+against HTTPS endpoints **you own or are explicitly authorized to assess**. The
+`--authorized` flag affirms permission; it does not grant permission.
+
+```bash
+python3 decrypto_assumption_scan.py \
+  --url https://your-authorized-domain.example/ \
+  --authorized --cors --out site_audit
+```
+
+Read the results in `site_audit.json` and `site_audit.md`. Add explicit
+`--url` flags (up to 12) for additional in-scope endpoints, and use
+`--private-url` for a URL declared private by its owner. The tool does
+not crawl a whole domain or test arbitrary URLs automatically.
+
+The scanner sends a HEAD request per public URL and optionally an additional
+GET with a harmless Origin header for `--cors`. A declared private URL uses
+an anonymous GET instead of HEAD. It never follows redirects or stores response
+bodies. HTTPS is required for non-loopback targets; query strings and embedded
+credentials are rejected. The command limits requests and adds delays.
+
+**Offline website test, without touching an external service:**
+
+```bash
+python3 -m unittest tests.test_website_cli -v
+```
+
+This starts a temporary HTTP server on 127.0.0.1, exercises the real CLI,
+checks that JSON/Markdown results are created and redacted, and confirms
+authorization is required. Static cryptographic checks, including nonce
+hypotheses, require access to source files; they are not inferred from HTTP
+response headers.
+
 Live HTTP/OpenAPI checks (assumption-driven)
 
 - HSTS missing on HTTPS endpoints
 - Session-like cookies missing Secure/HttpOnly/SameSite attributes
-- CORS credential reflection + caching leads. With `--cors`, two unrelated marker
-  origins are sent; if both are reflected with credentials, the finding is marked
-  `exploitability.directly_verifiable: true` (arbitrary-origin reflection proven from
-  response headers alone)
+- CORS credential reflection + caching leads (see paired CORS verification above)
 - Missing framing protection, missing `nosniff`, and Server/X-Powered-By version banners
   (always on; no extra requests)
 - `--check-redirects`: open-redirect reflection in the Location header (never followed)
@@ -80,7 +130,7 @@ Live HTTP/OpenAPI checks (assumption-driven)
 - Private-endpoint assumptions (gated by observable auth signals such as WWW-Authenticate or session-like Set-Cookie)
 - Offline OpenAPI contract inspection (API key-in-URL, mutating operations without documented security requirements)
 
-Exploitability verification: findings carry an optional `exploitability` object. It
+Exploitability verification: header, redirect, sensitive-path and TLS findings carry an optional `exploitability` object. It
 states whether the response data alone proves the mechanism, and what further
 owner-authorized testing is still needed. Status stays UNCONFIRMED until the owner
 validates real-world impact. The tool still sends no injection/XSS/SQLi payloads,
@@ -155,7 +205,8 @@ all arbitrary server-provided metadata is automatically sanitized.
 
 Limitations and next steps
 
-- The static crypto checks are intentionally conservative regex-based heuristics.
+- AEAD nonce analysis is source-only: it does not establish runtime key/nonce reuse and may miss aliases, helper functions, or complex control flow.
+- The static crypto checks are intentionally conservative regex-based heuristics, supplemented by a narrow Python AST rule.
   They will produce false positives and require language-aware analysis to
   improve signal-to-noise.
 - No commit-history scanning is performed by default. If you want history-based
@@ -174,3 +225,33 @@ License
 
 Provided as-is for authorized security review and responsible disclosure
 workflows.
+
+
+### Decrypto 1.3 policy leads and synthetic validation
+
+The authorized read-only scanner now reviews invalid/disabled HSTS max-age,
+SameSite values and None/Secure combinations, and __Host-/__Secure- cookie
+requirements. Cookie names and values remain in memory only. Prefix failures
+may mean a browser rejects a cookie, rather than exposing a session.
+
+Shared-cache checks use exact directive names across repeated fields and suppress
+leads for private, no-store, no-cache, or zero s-maxage policies. An explicitly
+owner-declared private endpoint can produce a cache lead without setting a cookie.
+CORS checks respect case-sensitive credential permission, reject duplicate
+allow-origin/credentials fields, and respect repeated Vary fields and Vary: *.
+Cache evidence is boolean metadata, never raw Cache-Control values.
+
+Offline OpenAPI review recognizes inherited security and anonymous alternatives
+(`security: []` or an empty requirement object in an OR list). Intentionally public
+writes still need owner review. Unresolved operation/path references are skipped;
+external references are never fetched. Malformed contract structures fail before
+any HTTP requests. This is a targeted review, not full OpenAPI schema validation.
+
+Reproduce the synthetic controls with `python -m unittest discover -s tests -v`.
+The tests cover positive/negative policy pairs, redaction, invalid input and the
+loopback-only CLI fixture. Existing standalone test functions are included in
+unittest discovery. No real website, credential, or customer data is needed.
+Leads remain unconfirmed; inherited HSTS, browser cookie rules, intended public
+operations and actual cache/CDN behavior require owner validation. Missing
+headers and contract declarations do not prove exploitable impact. Keep generated
+reports confidential and share only through the owner's approved disclosure channel.

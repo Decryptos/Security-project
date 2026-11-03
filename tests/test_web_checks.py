@@ -51,39 +51,17 @@ class TestLiveChecks(unittest.TestCase):
 
     def test_full_scan_rules_and_exploitability(self):
         result = scan_mod.scan(
-            [self.url], set(), cors=True, delay=0.5, timeout=3,
+            [self.url], set(), delay=0.5, timeout=3,
             check_redirects=True, check_sensitive_paths=True,
         )
         by_rule = {f["rule"]: f for f in result["findings"]}
-        for rule in ("CORS-TRUST", "OPEN-REDIRECT", "SENSITIVE-PATH-EXPOSED",
+        for rule in ("OPEN-REDIRECT", "SENSITIVE-PATH-EXPOSED",
                      "SERVER-BANNER", "CLICKJACK-HEADERS", "MIME-SNIFF"):
             self.assertIn(rule, by_rule)
-        self.assertTrue(by_rule["CORS-TRUST"]["exploitability"]["directly_verifiable"])
+        self.assertTrue(by_rule["OPEN-REDIRECT"]["exploitability"]["directly_verifiable"])
         self.assertFalse(by_rule["SENSITIVE-PATH-EXPOSED"]["exploitability"]["directly_verifiable"])
         self.assertTrue(all(f["status"].startswith("UNCONFIRMED") for f in result["findings"]))
         self.assertIn("Exploitability verification", scan_mod.markdown_report(result))
-
-
-class TestCorsVerification(unittest.TestCase):
-    @staticmethod
-    def _probe(origin):
-        headers = Message()
-        headers["Access-Control-Allow-Origin"] = origin
-        headers["Access-Control-Allow-Credentials"] = "true"
-        return 200, headers, origin
-
-    def test_single_origin_not_directly_verifiable(self):
-        findings = scan_mod.cors_checks("https://x/", [self._probe(scan_mod.MARKER_ORIGIN)])
-        self.assertFalse(findings[0]["exploitability"]["directly_verifiable"])
-
-    def test_two_origins_directly_verifiable(self):
-        probes = [self._probe(scan_mod.MARKER_ORIGIN), self._probe(scan_mod.MARKER_ORIGIN_2)]
-        self.assertTrue(scan_mod.cors_checks("https://x/", probes)[0]["exploitability"]["directly_verifiable"])
-
-    def test_allowlisted_origin_not_flagged(self):
-        headers = Message()
-        headers["Access-Control-Allow-Origin"] = "https://trusted.example"
-        self.assertEqual(scan_mod.cors_checks("https://x/", [(200, headers, scan_mod.MARKER_ORIGIN)]), [])
 
 
 class TestSecurityHeaders(unittest.TestCase):

@@ -48,9 +48,9 @@ def main() -> None:
     derived = derive_key_from_password(password, salt)
     digest = compute_hmac(b"hello", derived)
     print({
-        "salt_hex": salt.hex(),
-        "derived_key_hex": derived.hex(),
-        "hmac_hex": digest.hex(),
+        "salt_length": len(salt),
+        "derived_key_length": len(derived),
+        "hmac_verified": secure_compare(digest, compute_hmac(b"hello", derived)),
     })
 
 
