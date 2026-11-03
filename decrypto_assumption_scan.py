@@ -24,13 +24,28 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPHandler, HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from decrypto_taxonomy import classify, summarize
 from decrypto_validation import ORIGINS, evaluate_cors_pair, metadata
 
 VERSION = "1.3"
 MARKER_ORIGIN = "https://audit-origin.invalid"
 REDIRECT_MARKER = "https://audit-redirect.invalid/"
 REDIRECT_PARAMS = ("redirect", "return", "next")
-SENSITIVE_PATHS = ("/.git/HEAD", "/.env", "/.aws/credentials", "/wp-config.php.bak")
+SENSITIVE_PATH_KINDS = {
+    "/.git/HEAD": "version-control",
+    "/.svn/entries": "version-control",
+    "/.env": "environment-file",
+    "/.aws/credentials": "cloud-credentials",
+    "/.htpasswd": "credential-file",
+    "/id_rsa": "private-key",
+    "/wp-config.php.bak": "backup-file",
+    "/backup.zip": "backup-file",
+    "/.DS_Store": "metadata-file",
+    "/phpinfo.php": "debug-endpoint",
+    "/server-status": "debug-endpoint",
+    "/actuator/env": "debug-endpoint",
+}
+SENSITIVE_PATHS = tuple(SENSITIVE_PATH_KINDS)
 WEAK_TLS_PROTOCOLS = {"SSLv2", "SSLv3", "TLSv1", "TLSv1.1"}
 SESSION_NAME = re.compile(r"(?:session|sessid|(^|[_-])sid($|[_-])|auth|token|jwt|login)", re.I)
 METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
@@ -100,6 +115,7 @@ def new_finding(rule: str, url: str, title: str, assumption: str,
         "how_model_found_it": reasoning,
         "remediation": fix,
         "validation_needed": verification,
+        "taxonomy": classify(rule),
     }
     if exploitability is not None:
         finding["exploitability"] = exploitability
@@ -373,6 +389,106 @@ def security_header_checks(url: str, status: int, headers: Message) -> list[dict
             },
         ))
 
+    findings.extend(header_variant_checks(url, status, headers))
+    return findings
+
+
+FRAMEWORK_HEADERS = ("X-AspNet-Version", "X-AspNetMvc-Version", "X-Generator", "X-Drupal-Cache", "X-Runtime")
+
+
+def _header_finding(rule: str, url: str, title: str, assumption: str, evidence: dict[str, Any],
+                    fix: str, verification: str, priority: str = "low") -> dict[str, Any]:
+    return new_finding(
+        rule, url, title, assumption, evidence,
+        "Parsed the response headers already received for the baseline request; no extra request was sent.",
+        fix, verification, priority,
+        exploitability={"directly_verifiable": True, "method": "header_analysis",
+                        "requires_additional_testing": "Confirm real impact on the specific page and browsers in scope"},
+    )
+
+
+def header_variant_checks(url: str, status: int, headers: Message) -> list[dict[str, Any]]:
+    """Variant-level header findings: CSP weaknesses, referrer/permissions policy, framework banners, CORS wildcard."""
+    findings: list[dict[str, Any]] = []
+    csp_values = headers.get_all("Content-Security-Policy", [])
+    csp = {part.strip().split(None, 1)[0].lower(): (part.strip().split(None, 1)[1] if " " in part.strip() else "")
+           for value in csp_values for part in value.split(";") if part.strip()}
+
+    if not csp_values:
+        findings.append(_header_finding(
+            "CSP-MISSING", url, "No Content-Security-Policy header observed",
+            "Pages should restrict script and resource origins with a CSP to limit XSS impact.",
+            {"status": status, "content_security_policy": "absent"},
+            "Add a restrictive Content-Security-Policy (default-src 'self' plus nonces/hashes for scripts).",
+            "CSP is defence in depth; confirm whether the page handles untrusted content before treating it as risk."))
+    else:
+        script_src = (csp.get("script-src") or csp.get("default-src") or "").lower()
+        if "'unsafe-inline'" in script_src and "'nonce-" not in script_src and "'strict-dynamic'" not in script_src:
+            findings.append(_header_finding(
+                "CSP-UNSAFE-INLINE", url, "CSP allows unsafe-inline scripts",
+                "A CSP should block inline script execution.",
+                {"status": status, "directive": "script-src/default-src", "token": "'unsafe-inline'"},
+                "Remove 'unsafe-inline'; use nonces or hashes.",
+                "Weakens XSS mitigation only; it is not itself an XSS vulnerability.", "review"))
+        if "'unsafe-eval'" in script_src:
+            findings.append(_header_finding(
+                "CSP-UNSAFE-EVAL", url, "CSP allows unsafe-eval",
+                "A CSP should block string-to-code evaluation.",
+                {"status": status, "directive": "script-src/default-src", "token": "'unsafe-eval'"},
+                "Remove 'unsafe-eval' and refactor code that needs eval().",
+                "Weakens XSS mitigation only; it is not itself an XSS vulnerability."))
+        wide = [tok for tok in script_src.split() if tok in ("*", "https:", "http:", "data:")]
+        if wide:
+            findings.append(_header_finding(
+                "CSP-WILDCARD-SOURCE", url, "CSP script source allows a wildcard or whole scheme",
+                "Script sources should be an explicit allowlist.",
+                {"status": status, "directive": "script-src/default-src", "tokens": sorted(set(wide))},
+                "Replace wildcard/scheme sources with specific origins, nonces or hashes.",
+                "Check whether any allowed origin lets attackers host script (JSONP, open buckets).", "review"))
+        missing = [d for d in ("object-src", "base-uri") if d not in csp]
+        if missing:
+            findings.append(_header_finding(
+                "CSP-MISSING-DIRECTIVES", url, "CSP lacks object-src and/or base-uri",
+                "These directives do not fall back to default-src and are common CSP bypass paths.",
+                {"status": status, "missing_directives": missing},
+                "Add object-src 'none' and base-uri 'self'.",
+                "Defence-in-depth gap; confirm with the owner."))
+
+    referrer = (headers.get("Referrer-Policy") or "").strip().lower()
+    if not referrer or referrer in ("unsafe-url", "no-referrer-when-downgrade"):
+        findings.append(_header_finding(
+            "REFERRER-POLICY", url, "Referrer-Policy missing or leaks full URLs",
+            "Responses should limit referrer data sent to other origins.",
+            {"status": status, "referrer_policy": referrer or "absent"},
+            "Set Referrer-Policy: strict-origin-when-cross-origin (or stricter).",
+            "Matters only if URLs on this site carry sensitive data."))
+
+    if not headers.get("Permissions-Policy") and not headers.get("Feature-Policy"):
+        findings.append(_header_finding(
+            "PERMISSIONS-POLICY", url, "No Permissions-Policy header observed",
+            "Pages should disable browser features they do not use.",
+            {"status": status, "permissions_policy": "absent"},
+            "Add a Permissions-Policy denying camera, microphone, geolocation, etc. unless needed.",
+            "Hardening only; low impact."))
+
+    exposed = [name for name in FRAMEWORK_HEADERS if headers.get(name)]
+    if exposed:
+        findings.append(_header_finding(
+            "FRAMEWORK-BANNER", url, "Framework/CMS version header exposed",
+            "Framework fingerprinting headers should be removed.",
+            {"status": status, "headers": exposed},
+            "Remove or genericize these headers.",
+            "Match any disclosed version against known CVEs."))
+
+    allow = (headers.get("Access-Control-Allow-Origin") or "").strip()
+    creds = (headers.get("Access-Control-Allow-Credentials") or "").strip()
+    if allow == "*":
+        findings.append(_header_finding(
+            "CORS-WILDCARD", url, "Access-Control-Allow-Origin wildcard",
+            "Cross-origin access should be limited to approved origins.",
+            {"status": status, "allow_origin": "*", "allow_credentials_header": creds or "absent"},
+            "Use an explicit origin allowlist unless the resource is intentionally public.",
+            "Browsers refuse credentialed requests with '*'; confirm the content is public before reporting."))
     return findings
 
 
@@ -435,7 +551,7 @@ def sensitive_path_checks(opener, state: dict[str, int], delay: float, url: str,
                 url,
                 f"Potentially sensitive path responded 2xx: {sub}",
                 "Version-control and credential files should not be reachable over HTTP.",
-                {"status": status, "path": sub},
+                {"status": status, "path": sub, "kind": SENSITIVE_PATH_KINDS[sub]},
                 "Requested a well-known sensitive path with HEAD only; no response body was read or stored.",
                 "Block access to VCS directories and credential/config files at the web server layer; verify they are not present in the deployed webroot.",
                 "Many servers return 200 for any path (SPA catch-all routing); manually confirm within your authorized session that the body actually contains the sensitive file before reporting.",
@@ -715,6 +831,7 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
         "scope": normalized_urls,
         "total_requests": sent,
         "finding_count": len(findings),
+        "findings_by_category": summarize(findings),
         "findings": findings,
         "correlated_assumption_hypotheses": correlated,
         "correlated_hypothesis_count": len(correlated),
@@ -766,7 +883,7 @@ def markdown_report(result: dict[str, Any]) -> str:
         lines += [
             f"## Finding {number}: {finding['title']}",
             "",
-            f"**ID:** `{finding['id']}` | **Rule:** `{finding['rule']}` | **Priority:** {finding['priority']} | **Status:** {finding['status']}",
+            f"**ID:** `{finding['id']}` | **Rule:** `{finding['rule']}` | **Class:** {finding['taxonomy']['category']} / {finding['taxonomy']['subtype']} ({finding['taxonomy']['cwe'] or 'no CWE'}) | **Priority:** {finding['priority']} | **Status:** {finding['status']}",
             "",
             f"**Affected endpoint/contract:** `{finding['target']}`",
             "",
@@ -883,8 +1000,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     if len(urls) > max_urls:
         parser.error(f"Maximum of {max_urls} URLs per run")
-    if len(urls) * per_url_requests > max_urls * 11:
-        parser.error(f"Maximum of {max_urls * 11} requests per run with the selected checks; reduce URLs or disable some --check-* flags")
+    if len(urls) * per_url_requests > 250:
+        parser.error("Maximum of 250 requests per run with the selected checks; reduce URLs or disable some --check-* flags")
 
     try:
         result = scan(urls, set(args.private_url), cors=args.cors, delay=args.delay, timeout=args.timeout, openapi=args.openapi,

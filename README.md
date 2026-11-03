@@ -130,6 +130,16 @@ Live HTTP/OpenAPI checks (assumption-driven)
 - Private-endpoint assumptions (gated by observable auth signals such as WWW-Authenticate or session-like Set-Cookie)
 - Offline OpenAPI contract inspection (API key-in-URL, mutating operations without documented security requirements)
 
+Bug-class taxonomy: every finding carries a `taxonomy` object (category, subtype, CWE,
+OWASP Top 10 2021) from `decrypto_taxonomy.py`, and reports include `findings_by_category`.
+Variants covered include CSP weaknesses (missing, `unsafe-inline`, `unsafe-eval`, wildcard
+sources, missing `object-src`/`base-uri`), Referrer-Policy and Permissions-Policy gaps,
+framework version headers, CORS wildcard, twelve sensitive-path kinds (version control,
+environment files, cloud credentials, backups, debug endpoints), and static crypto variants
+(ECB mode, deprecated TLS protocols, small RSA keys, low KDF iterations, JWT `none`,
+hardcoded IV/nonce). This is a bounded, passive rule set, not every possible bug class; it
+does not cover injection, XSS, IDOR or logic flaws, which need authorized manual testing.
+
 Exploitability verification: header, redirect, sensitive-path and TLS findings carry an optional `exploitability` object. It
 states whether the response data alone proves the mechanism, and what further
 owner-authorized testing is still needed. Status stays UNCONFIRMED until the owner

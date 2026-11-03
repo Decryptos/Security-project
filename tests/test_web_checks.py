@@ -69,6 +69,9 @@ class TestSecurityHeaders(unittest.TestCase):
         headers = Message()
         headers["X-Frame-Options"] = "DENY"
         headers["X-Content-Type-Options"] = "nosniff"
+        headers["Content-Security-Policy"] = "default-src 'self'; object-src 'none'; base-uri 'self'"
+        headers["Referrer-Policy"] = "no-referrer"
+        headers["Permissions-Policy"] = "camera=()"
         self.assertEqual(scan_mod.security_header_checks("https://x/", 200, headers), [])
 
     def test_error_status_skipped(self):
