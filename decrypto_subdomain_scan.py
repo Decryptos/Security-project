@@ -17,8 +17,10 @@ hosts.
 
 from __future__ import annotations
 
+import concurrent.futures
 import fnmatch
 import json
+import math
 import re
 import socket
 import ssl
@@ -35,6 +37,14 @@ _HOSTNAME_RE = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?
 # unbounded sweep against domains with very large certificate-transparency
 # histories.
 MAX_SUBDOMAINS_CEILING = 100
+
+# Bound on concurrent DNS lookups in resolve_live_hosts(). These lookups never
+# reach the candidate host's own infrastructure (see module docstring), so
+# running them in parallel changes nothing about the tool's safety posture
+# toward the authorized target — it only changes how many queries the
+# operator's own configured resolver handles at once, which is routinely far
+# higher than this for ordinary browsing.
+MAX_RESOLVER_WORKERS = 20
 
 
 def _valid_hostname(name: str) -> bool:
@@ -90,27 +100,58 @@ def discover_subdomains_crtsh(domain: str, *, timeout: float = 8.0) -> set[str]:
     return names
 
 
-def resolve_live_hosts(hostnames: set[str], *, timeout: float = 3.0, max_hosts: int = 50) -> dict[str, list[str]]:
+def resolve_live_hosts(hostnames: set[str], *, timeout: float = 3.0, max_hosts: int = 50,
+                        max_workers: int = MAX_RESOLVER_WORKERS) -> dict[str, list[str]]:
     """Resolve which candidate subdomains currently have a DNS record.
 
     Only a DNS lookup via the local resolver is performed; no packets are ever
     sent to the candidate host's own infrastructure. Caps lookups at
     `max_hosts` to bound passive recon runs.
+
+    Lookups run concurrently (bounded by `max_workers`), so resolving many
+    candidates costs close to one lookup's latency rather than their sum.
+    This also fixes a latent correctness gap: `socket.getaddrinfo()` takes no
+    timeout argument and does not honor `socket.setdefaulttimeout()`, so a
+    purely sequential loop (the previous implementation) had no real per-host
+    bound — one slow-to-resolve hostname could stall the entire discovery
+    run. Here each lookup is instead raced against `timeout` from a worker
+    thread; a lookup still running when its deadline passes is abandoned
+    (never cancelled — Python cannot interrupt a blocking call) and simply
+    excluded from the result, which is no worse than the previous unbounded
+    behavior and far better in every other case.
     """
+    targets = sorted(hostnames)[:max_hosts]
+    if not targets:
+        return {}
+
+    workers = max(1, min(max_workers, len(targets)))
+    # Generous overall deadline: worst case is one full `timeout` per
+    # sequential batch the pool must run, plus one spare batch of slack.
+    overall_timeout = timeout * (math.ceil(len(targets) / workers) + 1)
+
     live: dict[str, list[str]] = {}
-    previous_timeout = socket.getdefaulttimeout()
-    socket.setdefaulttimeout(timeout)
+    # Not a `with` block: on exit that would call shutdown(wait=True), which
+    # blocks until every submitted lookup finishes — defeating the deadline
+    # below for any hostname whose lookup is still hanging. shutdown(wait=False)
+    # instead lets this function return on time and abandons stragglers; the
+    # process (a short-lived CLI run) exits soon after regardless.
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
     try:
-        for hostname in sorted(hostnames)[:max_hosts]:
-            try:
-                infos = socket.getaddrinfo(hostname, None)
-            except (socket.gaierror, OSError):
-                continue
-            addresses = sorted({info[4][0] for info in infos})
-            if addresses:
-                live[hostname] = addresses
+        future_to_host = {pool.submit(socket.getaddrinfo, hostname, None): hostname for hostname in targets}
+        try:
+            for future in concurrent.futures.as_completed(future_to_host, timeout=overall_timeout):
+                hostname = future_to_host[future]
+                try:
+                    infos = future.result()
+                except (socket.gaierror, OSError):
+                    continue
+                addresses = sorted({info[4][0] for info in infos})
+                if addresses:
+                    live[hostname] = addresses
+        except concurrent.futures.TimeoutError:
+            pass  # Remaining candidates did not resolve within the bounded window; simply omitted.
     finally:
-        socket.setdefaulttimeout(previous_timeout)
+        pool.shutdown(wait=False, cancel_futures=True)
     return live
 
 

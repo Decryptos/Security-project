@@ -343,3 +343,11 @@ stored in the JSON/Markdown report, which this tool's redaction policy does
 not allow. `MAX_PAYLOAD_REQUESTS_PER_POINT` (and therefore
 `MAX_REQUESTS_PER_DOMAIN_RUN`, now 9,000) grew accordingly.
 
+`resolve_live_hosts()` in `decrypto_subdomain_scan.py` now resolves candidate
+subdomains concurrently (bounded worker pool) instead of one at a time, so a
+`--domain` run with many discovered candidates completes substantially
+faster; a slow-to-resolve hostname can no longer stall discovery of the rest.
+This only changes query concurrency against the operator's own configured
+DNS resolver — it never contacts a candidate host's own infrastructure, so
+it does not change the tool's safety posture toward the authorized target.
+

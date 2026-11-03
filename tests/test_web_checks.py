@@ -2,8 +2,10 @@
 
 import http.server
 import re
+import socket
 import sys
 import threading
+import time
 import unittest
 from email.message import Message
 from pathlib import Path
@@ -184,6 +186,46 @@ class TestSubdomains(unittest.TestCase):
         self.assertEqual(report["live_and_in_scope"], 2)
         self.assertEqual(report["selected"], ["https://example.com/"])
         self.assertTrue(report["truncated_by_ceiling"])
+
+    def test_resolve_live_hosts_returns_sorted_unique_addresses(self):
+        def fake_getaddrinfo(host, port):
+            return [(2, 1, 6, "", ("1.1.1.2", 0)), (2, 1, 6, "", ("1.1.1.1", 0)), (2, 1, 6, "", ("1.1.1.1", 0))]
+
+        with mock.patch.object(sub_mod.socket, "getaddrinfo", side_effect=fake_getaddrinfo):
+            live = sub_mod.resolve_live_hosts({"a.example.test"}, timeout=1, max_hosts=5)
+        self.assertEqual(live, {"a.example.test": ["1.1.1.1", "1.1.1.2"]})
+
+    def test_resolve_live_hosts_excludes_hosts_that_fail_to_resolve(self):
+        with mock.patch.object(sub_mod.socket, "getaddrinfo", side_effect=socket.gaierror("not found")):
+            live = sub_mod.resolve_live_hosts({"a.example.test"}, timeout=1, max_hosts=5)
+        self.assertEqual(live, {})
+
+    def test_resolve_live_hosts_respects_max_hosts_cap(self):
+        calls = []
+
+        def fake_getaddrinfo(host, port):
+            calls.append(host)
+            return [(2, 1, 6, "", ("1.1.1.1", 0))]
+
+        hostnames = {f"h{i}.example.test" for i in range(10)}
+        with mock.patch.object(sub_mod.socket, "getaddrinfo", side_effect=fake_getaddrinfo):
+            sub_mod.resolve_live_hosts(hostnames, timeout=1, max_hosts=3)
+        self.assertEqual(len(calls), 3)
+
+    def test_resolve_live_hosts_runs_concurrently_and_bounds_slow_lookups(self):
+        """A hanging lookup must not block collection of the other, faster results."""
+        def fake_getaddrinfo(host, port):
+            if host == "slow.example.test":
+                time.sleep(2)
+            return [(2, 1, 6, "", ("203.0.113.1", 0))]
+
+        hostnames = {"a.example.test", "b.example.test", "slow.example.test"}
+        with mock.patch.object(sub_mod.socket, "getaddrinfo", side_effect=fake_getaddrinfo):
+            start = time.monotonic()
+            live = sub_mod.resolve_live_hosts(hostnames, timeout=0.3, max_hosts=10, max_workers=10)
+            elapsed = time.monotonic() - start
+        self.assertEqual(set(live), {"a.example.test", "b.example.test"})
+        self.assertLess(elapsed, 1.5, "slow lookup should be abandoned, not waited out serially")
 
     def test_max_subdomains_out_of_range_rejected(self):
         with self.assertRaises(ValueError):

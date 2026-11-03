@@ -25,8 +25,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPHandler, HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from decrypto_active_checks import MAX_INJECTION_POINTS, MAX_PAYLOAD_REQUESTS_PER_POINT, active_payload_checks
+from decrypto_findings import new_finding
 from decrypto_subdomain_scan import MAX_SUBDOMAINS_CEILING
-from decrypto_taxonomy import classify, summarize, summarize_by_owasp
+from decrypto_taxonomy import summarize, summarize_by_owasp
 from decrypto_validation import ORIGINS, evaluate_cors_pair, metadata
 
 VERSION = "1.4"
@@ -99,37 +100,6 @@ def validate_url(url: str) -> str:
     """Validation helper that keeps only explicit, restricted URLs in scope."""
     normalized = normalize_url(url)
     return normalized
-
-
-def new_finding(rule: str, url: str, title: str, assumption: str,
-                evidence: dict[str, Any], reasoning: str, fix: str, verification: str,
-                priority: str = "review", exploitability: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Build a finding.
-
-    `exploitability`, when provided, states — in a conservative, falsifiable way —
-    whether the *observed response data alone* (never an attack payload) already
-    confirms the mechanism, or whether further owner-authorized testing is still
-    required before any impact claim. It never upgrades `status`, which always
-    stays UNCONFIRMED until the owner validates real-world impact.
-    """
-    finding = {
-        "id": hashlib.sha256((rule + "|" + url).encode()).hexdigest()[:10].upper(),
-        "rule": rule,
-        "target": url,
-        "title": title,
-        "priority": priority,
-        "status": "UNCONFIRMED — needs owner validation",
-        "evidence_class": "observable_configuration_or_contract",
-        "assumption_tested": assumption,
-        "evidence": evidence,
-        "how_model_found_it": reasoning,
-        "remediation": fix,
-        "validation_needed": verification,
-        "taxonomy": classify(rule),
-    }
-    if exploitability is not None:
-        finding["exploitability"] = exploitability
-    return finding
 
 
 
@@ -820,11 +790,11 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
             findings.extend(open_redirect_checks(opener, state, delay, url, timeout))
         if check_sensitive_paths:
             findings.extend(sensitive_path_checks(opener, state, delay, url, timeout))
-        if check_tls and urlsplit(url).scheme == "https":
+        if check_tls and (url_parts := urlsplit(url)).scheme == "https":
             if state["sent"]:
                 time.sleep(delay)
             state["sent"] += 1
-            findings.extend(tls_checks(urlsplit(url).hostname, urlsplit(url).port or 443, timeout))
+            findings.extend(tls_checks(url_parts.hostname, url_parts.port or 443, timeout))
         if enable_active_payloads:
             findings.extend(active_payload_checks(opener, state, delay, url, timeout, max_points=max_injection_points))
         sent = state["sent"]

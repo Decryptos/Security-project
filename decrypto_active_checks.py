@@ -44,6 +44,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import Request
 
+from decrypto_findings import new_finding
+
 MAX_INJECTION_POINTS = 3
 MAX_BODY_BYTES = 200_000
 TIME_DELAY_SECONDS = 3
@@ -238,10 +240,6 @@ def _throttled_payload_send(opener, state: dict[str, int], delay: float, url: st
 
 def _finding(rule: str, point: dict[str, Any], evidence: dict[str, Any], reasoning: str, fix: str,
              directly_verifiable: bool, method: str, priority: str = "high") -> dict[str, Any]:
-    from decrypto_assumption_scan import (
-        new_finding,  # deferred: avoids a module import cycle
-    )
-
     full_evidence = {**evidence, "parameter": point["param"], "http_method": point["method"]}
     return new_finding(
         rule,
