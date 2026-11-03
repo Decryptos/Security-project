@@ -8,8 +8,10 @@ review, not confirmed vulnerabilities.
 """
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -65,6 +67,9 @@ _PATTERNS = [
 ]
 
 
+_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
+
+
 def _match_excerpt(text: str, start: int, end: int) -> str:
     """Return a short, redacted snippet for evidence without re-scanning large strings."""
     snippet = text[max(0, start - 40):min(len(text), end + 40)]
@@ -75,11 +80,13 @@ def _scan_text(path: Path, root: Path, text: str) -> list[dict[str, Any]]:
     """Scan a file once against the compiled regex list and collect findings."""
     findings: list[dict[str, Any]] = []
     relative_path = str(path.relative_to(root))
+    # Precompute newline offsets so each match's line number is a binary search, not a rescan.
+    newlines = [i for i, ch in enumerate(text) if ch == "\n"]
     for pattern, rule, title in _PATTERNS:
         for m in pattern.finditer(text):
             evidence = {
                 "file": relative_path,
-                "line": text.count("\n", 0, m.start()) + 1,
+                "line": bisect.bisect_left(newlines, m.start()) + 1,
                 "match_excerpt": _match_excerpt(text, m.start(), m.end()),
             }
             findings.append(_make_finding(rule, f'{evidence["file"]}:{evidence["line"]}', title, evidence))
@@ -105,19 +112,20 @@ def scan_repo_for_crypto_issues(root: Path, languages: list[str] | None = None) 
     findings: list[dict[str, Any]] = []
     inspected = 0
 
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        lang = _file_language(path)
-        if lang is None or lang not in languages:
-            continue
-        # Skip large binary files; the scanner is intentionally heuristic-based.
-        try:
-            text = path.read_text(encoding="utf-8")
-        except Exception:
-            continue
-        inspected += 1
-        findings.extend(_scan_text(path, root, text))
+    # Prune VCS/dependency directories in-place so they are never traversed.
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        for name in filenames:
+            path = Path(dirpath) / name
+            lang = _file_language(path)
+            if lang is None or lang not in languages:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            inspected += 1
+            findings.extend(_scan_text(path, root, text))
 
     meta = {"files_inspected": inspected, "languages": languages, "finding_count": len(findings)}
     return {"findings": findings, "meta": meta}

@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
-from typing import Any
 
 
 def generate_random_bytes(length: int = 32) -> bytes:

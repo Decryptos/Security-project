@@ -63,9 +63,28 @@ Live HTTP/OpenAPI checks (assumption-driven)
 
 - HSTS missing on HTTPS endpoints
 - Session-like cookies missing Secure/HttpOnly/SameSite attributes
-- CORS credential reflection + caching leads
+- CORS credential reflection + caching leads. With `--cors`, two unrelated marker
+  origins are sent; if both are reflected with credentials, the finding is marked
+  `exploitability.directly_verifiable: true` (arbitrary-origin reflection proven from
+  response headers alone)
+- Missing framing protection, missing `nosniff`, and Server/X-Powered-By version banners
+  (always on; no extra requests)
+- `--check-redirects`: open-redirect reflection in the Location header (never followed)
+- `--check-sensitive-paths`: HEAD-only probe of `/.git/HEAD`, `/.env`, `/.aws/credentials`,
+  `/wp-config.php.bak` (2xx is a lead; SPA catch-alls cause false positives)
+- `--check-tls`: certificate expiry and weak negotiated protocol via one handshake per host
+- `--domain example.com`: passively finds
+  subdomains (crt.sh certificate-transparency logs + DNS resolution, via
+  `decrypto_subdomain_scan.py`) and adds up to `--max-subdomains` (default 5, max 15) to the
+  scan. Requires `--authorized`; the discovery step never contacts the subdomains itself.
 - Private-endpoint assumptions (gated by observable auth signals such as WWW-Authenticate or session-like Set-Cookie)
 - Offline OpenAPI contract inspection (API key-in-URL, mutating operations without documented security requirements)
+
+Exploitability verification: findings carry an optional `exploitability` object. It
+states whether the response data alone proves the mechanism, and what further
+owner-authorized testing is still needed. Status stays UNCONFIRMED until the owner
+validates real-world impact. The tool still sends no injection/XSS/SQLi payloads,
+brute-force, IDOR, or load tests.
 
 Important safety and privacy constraints
 
