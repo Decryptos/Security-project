@@ -14,7 +14,6 @@ TAXONOMY: dict[str, tuple[str, str, str, str]] = {
     # Transport security
     "TLS-HSTS": ("transport-security", "missing-or-invalid-hsts", "CWE-319", "A02"),
     "TLS-CERT-EXPIRY": ("transport-security", "expired-certificate", "CWE-298", "A02"),
-    "TLS-WEAK-PROTOCOL": ("transport-security", "deprecated-tls-protocol", "CWE-326", "A02"),
     # Session / cookies
     "SESSION-COOKIE": ("session-management", "missing-cookie-attributes", "CWE-614", "A05"),
     # Access control

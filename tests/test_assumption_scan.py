@@ -35,7 +35,7 @@ def test_normalize_url_rejects_query_string():
     """Test that URLs with query strings are rejected."""
     try:
         normalize_url("https://example.com/path?query=value")
-        assert False, "Should have raised ValueError"
+        raise AssertionError("Should have raised ValueError")
     except ValueError:
         pass
 
@@ -44,7 +44,7 @@ def test_normalize_url_rejects_credentials():
     """Test that URLs with embedded credentials are rejected."""
     try:
         normalize_url("https://user:pass@example.com/path")
-        assert False, "Should have raised ValueError"
+        raise AssertionError("Should have raised ValueError")
     except ValueError:
         pass
 
@@ -53,7 +53,7 @@ def test_normalize_url_rejects_http_non_localhost():
     """Test that non-HTTPS URLs are rejected unless localhost."""
     try:
         normalize_url("http://example.com/path")
-        assert False, "Should have raised ValueError"
+        raise AssertionError("Should have raised ValueError")
     except ValueError:
         pass
 

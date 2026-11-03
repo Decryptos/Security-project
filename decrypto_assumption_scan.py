@@ -46,7 +46,6 @@ SENSITIVE_PATH_KINDS = {
     "/actuator/env": "debug-endpoint",
 }
 SENSITIVE_PATHS = tuple(SENSITIVE_PATH_KINDS)
-WEAK_TLS_PROTOCOLS = {"SSLv2", "SSLv3", "TLSv1", "TLSv1.1"}
 SESSION_NAME = re.compile(r"(?:session|sessid|(^|[_-])sid($|[_-])|auth|token|jwt|login)", re.I)
 METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
 
@@ -566,20 +565,38 @@ def sensitive_path_checks(opener, state: dict[str, int], delay: float, url: str,
 
 
 def tls_checks(hostname: str, port: int, timeout: float) -> list[dict[str, Any]]:
-    """Open one TLS connection to read the certificate expiry and negotiated protocol.
+    """Open one TLS connection to read the certificate expiry.
 
-    No HTTP request is sent on this connection; only the TLS handshake metadata
-    is inspected. Errors are swallowed because this check is best-effort and
+    The client requires TLS 1.2+ and full certificate verification, so servers
+    that only offer older protocols fail the handshake and yield no finding.
+    No HTTP request is sent on this connection; only handshake metadata is
+    inspected. Errors are swallowed because this check is best-effort and
     optional (`--check-tls`).
     """
     findings: list[dict[str, Any]] = []
     target = f"https://{hostname}/"
     context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     try:
         with socket.create_connection((hostname, port), timeout=timeout) as sock:
             with context.wrap_socket(sock, server_hostname=hostname) as tls_sock:
                 cert = tls_sock.getpeercert()
-                protocol = tls_sock.version()
+    except ssl.SSLCertVerificationError as exc:
+        # An expired certificate fails verification, so the handshake never yields a cert to inspect.
+        if "expired" in (exc.verify_message or "").lower():
+            findings.append(new_finding(
+                "TLS-CERT-EXPIRY",
+                target,
+                "TLS certificate is expired",
+                "Certificates should be renewed before expiry to avoid trust failures.",
+                {"verify_message": exc.verify_message, "expired": True},
+                "Certificate verification failed with an expiry error during the TLS handshake; no HTTP request was sent.",
+                "Renew the certificate and confirm automated renewal (e.g., ACME) is configured.",
+                "Directly verifiable from the handshake itself; no further testing needed.",
+                "high",
+                exploitability={"directly_verifiable": True, "method": "tls_certificate_metadata", "requires_additional_testing": "No"},
+            ))
+        return findings
     except (OSError, ssl.SSLError, socket.timeout):
         return findings
 
@@ -604,20 +621,6 @@ def tls_checks(hostname: str, port: int, timeout: float) -> list[dict[str, Any]]
                     "high" if days_left < 0 else "review",
                     exploitability={"directly_verifiable": True, "method": "tls_certificate_metadata", "requires_additional_testing": "No"},
                 ))
-
-    if protocol in WEAK_TLS_PROTOCOLS:
-        findings.append(new_finding(
-            "TLS-WEAK-PROTOCOL",
-            target,
-            f"Weak TLS protocol version negotiated: {protocol}",
-            "Servers should negotiate TLS 1.2 or newer only.",
-            {"negotiated_protocol": protocol},
-            "Read the negotiated protocol version from the TLS handshake; no HTTP request was sent.",
-            "Disable SSLv2/SSLv3/TLS1.0/TLS1.1 on the server and require TLS 1.2+.",
-            "Directly verifiable from the handshake itself; no further testing needed.",
-            "high",
-            exploitability={"directly_verifiable": True, "method": "tls_handshake_metadata", "requires_additional_testing": "No"},
-        ))
 
     return findings
 

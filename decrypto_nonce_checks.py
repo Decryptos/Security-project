@@ -6,7 +6,6 @@ No literals, variable values, or source excerpts are included in evidence.
 from __future__ import annotations
 
 import ast
-from pathlib import Path
 from typing import Any
 
 _AEAD = {"AESGCM", "ChaCha20Poly1305"}

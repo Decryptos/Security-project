@@ -1,6 +1,7 @@
 """Tests for header, CORS, redirect, sensitive-path and subdomain helpers (loopback fixture only)."""
 
 import http.server
+import re
 import sys
 import threading
 import unittest
@@ -23,14 +24,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/?redirect="):
             self.send_response(302)
-            self.send_header("Location", self.path.split("=", 1)[1])
+            self.send_header("Location", re.sub(r"[\r\n]", "", self.path.split("=", 1)[1]))
             self.end_headers()
             return
-        origin = self.headers.get("Origin")
         self.send_response(200)
-        if origin:
-            self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Access-Control-Allow-Credentials", "true")
         self.end_headers()
 
     def log_message(self, *args):
@@ -76,6 +73,18 @@ class TestSecurityHeaders(unittest.TestCase):
 
     def test_error_status_skipped(self):
         self.assertEqual(scan_mod.security_header_checks("https://x/", 500, Message()), [])
+
+
+class TestTls(unittest.TestCase):
+    def test_expired_certificate_reported(self):
+        exc = scan_mod.ssl.SSLCertVerificationError(1, "certificate has expired")
+        exc.verify_message = "certificate has expired"
+        with mock.patch.object(scan_mod.socket, "create_connection", side_effect=exc):
+            findings = scan_mod.tls_checks("expired.test", 443, 1)
+        self.assertEqual([f["rule"] for f in findings], ["TLS-CERT-EXPIRY"])
+
+    def test_unreachable_host_yields_nothing(self):
+        self.assertEqual(scan_mod.tls_checks("127.0.0.1", 1, 1), [])
 
 
 class TestSubdomains(unittest.TestCase):

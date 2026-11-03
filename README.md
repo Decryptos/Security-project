@@ -122,7 +122,7 @@ Live HTTP/OpenAPI checks (assumption-driven)
 - `--check-redirects`: open-redirect reflection in the Location header (never followed)
 - `--check-sensitive-paths`: HEAD-only probe of `/.git/HEAD`, `/.env`, `/.aws/credentials`,
   `/wp-config.php.bak` (2xx is a lead; SPA catch-alls cause false positives)
-- `--check-tls`: certificate expiry and weak negotiated protocol via one handshake per host
+- `--check-tls`: certificate expiry (including already-expired certificates, which fail verification) via one TLS 1.2+ handshake per host
 - `--domain example.com`: passively finds
   subdomains (crt.sh certificate-transparency logs + DNS resolution, via
   `decrypto_subdomain_scan.py`) and adds up to `--max-subdomains` (default 5, max 15) to the
