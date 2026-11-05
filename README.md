@@ -229,6 +229,36 @@ skipped or excluded code is safe.
 
 Limitations and next steps
 
+### Additional Python bug-finding checks
+
+The offline repository scanner now includes four AST-based rule families:
+
+| Rule | Observed pattern | Safer control |
+| --- | --- | --- |
+| `PY-UNSAFE-DESERIALIZATION` | `pickle`, `_pickle`, or `dill` object loading | Data-only parsing such as `json.loads` |
+| `PY-UNSAFE-YAML` | Unsafe YAML APIs or `load/load_all` without a recognized safe loader | `safe_load`, `SafeLoader`, or `CSafeLoader` |
+| `PY-SHELL-EXECUTION` | `os.system/popen`, subprocess shell helpers, or explicit `shell=True` | Argument lists with `shell=False` |
+| `PY-DYNAMIC-EVALUATION` | Builtin `eval/exec`, including imported aliases | Constrained parsing or explicit dispatch |
+
+Run all existing crypto checks and these new Python checks together:
+
+```bash
+python decrypto_crypto_checks.py /path/to/authorized/local/source
+```
+
+No scanned source is imported or executed. New findings include CWE/category
+metadata, remediation, source locations, and hashes without source literals.
+Trusted uses of these APIs can be intentional; no input provenance, taint flow,
+exploitability, or runtime reachability is established.
+
+The new resolver recognizes unambiguous imports in module and function scopes.
+It suppresses rebound names conservatively and does not analyze class bodies,
+methods, or comprehension scopes. Star imports, dynamic imports, monkey-patching,
+wrapper functions, and complex control flow are not resolved. Safe alternatives
+in the table suppress these particular rules; they are not a general security
+guarantee. Syntax or AST resource errors are reported as partial coverage
+(`regex checks only`) rather than silently counted as complete AST analysis.
+
 - AEAD nonce analysis is source-only: it does not establish runtime key/nonce reuse and may miss aliases, helper functions, or complex control flow.
 - The static crypto checks are intentionally conservative regex-based heuristics, supplemented by a narrow Python AST rule.
   They will produce false positives and require language-aware analysis to

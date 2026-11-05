@@ -18,6 +18,7 @@ from typing import Any
 
 from decrypto_taxonomy import classify, summarize
 from decrypto_nonce_checks import check_python_aead_nonces
+from decrypto_python_checks import check_python_security
 
 # Reuse the new_finding factory shape from the main scanner by reconstructing a
 # compatible minimal function here. The main module will merge findings.
@@ -167,7 +168,11 @@ def scan_repo_for_crypto_issues(root: Path, languages: list[str] | None = None) 
             inspected += 1
             file_findings = _scan_text(path, root, text)
             if lang == "python":
-                file_findings.extend(check_python_aead_nonces(text, relative))
+                try:
+                    file_findings.extend(check_python_security(text, relative))
+                    file_findings.extend(check_python_aead_nonces(text, relative))
+                except (SyntaxError, ValueError, RecursionError):
+                    skipped.append({"file": relative, "reason": "Python AST checks unavailable; regex checks only"})
             # Hash the exact input bytes; do not normalize line endings.
             source_hash = hashlib.sha256(raw).hexdigest()
             for finding in file_findings:
