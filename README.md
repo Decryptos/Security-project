@@ -203,9 +203,52 @@ Repository administrators should require the CI and security checks in branch
 protection before merging. Workflow files alone do not enforce merge protection.
 CodeQL availability also depends on the repository's GitHub security settings.
 
-Authentication and sensitive output
+### Controlled cross-account read validation
 
-The auditor sends anonymous requests; it does not accept passwords, session
+`decrypto_access_validation.py` is a separate, opt-in validator for a specific
+access-control failure. It does not discover object IDs or exploit arbitrary
+findings. Use it only where the program permits authenticated testing with two
+accounts you control, against GET endpoints that have no side effects.
+
+1. Create one private synthetic record in account A and another in account B.
+   Give each a different unpredictable marker (16–256 UTF-8 bytes), stored in the
+   record content, not its URL. Confirm policy says each record is owner-only.
+2. Copy `examples/access-validation.json`. Supply both exact record URLs on the
+   same origin, the two markers, and the applicable permission reference.
+3. Set the named environment variables to the respective bearer credentials in
+   your local environment. Do not put credentials in JSON, command arguments,
+   source control, or reports.
+4. Run:
+
+```bash
+python decrypto_access_validation.py --config my-validation.json --authorized --out validation-result.json
+```
+
+The output file must not already exist. Keep your config and test-account
+mapping privately so you can reproduce the request sequence. Requests use GET
+and bearer authentication only: A reads A's record, B reads B's record,
+anonymous reads A's record, then B reads A's record. The sequence runs twice,
+with a one-second delay between requests, for at most eight requests.
+Failed controls stop the run early. No redirects, ID enumeration, state-changing
+requests, cookie storage, or proxy environment settings are used.
+
+| Result | Meaning |
+| --- | --- |
+| `reproduced_cross_account_read` | B retrieved A's synthetic marker twice; both own-record controls passed and anonymous requests were denied |
+| `not_reproduced` | Both cross-account probes were denied with passing controls |
+| `inconclusive` | Controls failed, responses were incomplete/redirected, or results were inconsistent |
+
+Reports retain role-labelled observations, statuses, byte counts and body hashes.
+They omit credentials, response bodies, markers, and raw URLs. Reads are bounded
+to 64 KiB plus one byte; oversized or encoded responses cannot establish success.
+URLs with query strings are currently unsupported. Ownership, different account
+identities, permission and intended policy remain operator assertions. A successful
+run demonstrates disclosure of the supplied synthetic marker; it does not identify
+the root cause, validate other exploit classes, or guarantee a bounty.
+
+### Authentication and sensitive output
+
+The main auditor sends anonymous requests; it does not accept passwords, session
 cookies or bearer tokens. `--authorized` is an operator permission assertion,
 not an authentication mechanism. URL validation errors do not echo rejected
 credential-bearing URLs. The standalone crypto demonstration prints sizes and
