@@ -11,6 +11,7 @@ from __future__ import annotations
 import bisect
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -79,16 +80,11 @@ _PATTERNS = [
 ]
 
 
-def _match_excerpt(text: str, start: int, end: int) -> str:
-    """Return a short, redacted snippet for evidence without re-scanning large strings."""
-    snippet = text[max(0, start - 40):min(len(text), end + 40)]
-    return re.sub(r"[A-Za-z0-9+/=]{8,}", "<REDACTED>", snippet)[:200]
-
-
 def _scan_text(path: Path, root: Path, text: str) -> list[dict[str, Any]]:
     """Scan a file once against the compiled regex list and collect findings."""
     findings: list[dict[str, Any]] = []
     relative_path = str(path.relative_to(root))
+    source_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
     # Precompute newline offsets so each match's line number is a binary search, not a rescan.
     newlines = [i for i, ch in enumerate(text) if ch == "\n"]
     for pattern, rule, title in _PATTERNS:
@@ -97,7 +93,7 @@ def _scan_text(path: Path, root: Path, text: str) -> list[dict[str, Any]]:
                 "file": relative_path,
                 "line": bisect.bisect_left(newlines, m.start()) + 1,
                 "column": m.start() - text.rfind("\n", 0, m.start()),
-                "match_excerpt": _match_excerpt(text, m.start(), m.end()),
+                "source_sha256": source_sha256,
             }
             findings.append(_make_finding(
                 rule,
@@ -126,30 +122,61 @@ def scan_repo_for_crypto_issues(root: Path, languages: list[str] | None = None) 
 
     findings: list[dict[str, Any]] = []
     inspected = 0
+    skipped: list[dict[str, str]] = []
 
     root = root.resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("Source root must be a directory")
     excluded_dirs = {".git", ".venv", "venv", "node_modules", "__pycache__"}
-    for path in root.rglob("*"):
-        if excluded_dirs.intersection(path.relative_to(root).parts):
-            continue
-        if path.is_symlink() or not path.is_file():
-            continue
-        lang = _file_language(path)
-        if lang is None or lang not in languages:
-            continue
-        # Bound memory use and skip links outside the selected root.
-        try:
-            if path.stat().st_size > 1_048_576:
-                continue
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            continue
-        inspected += 1
-        findings.extend(_scan_text(path, root, text))
-        if lang == "python":
-            findings.extend(check_python_aead_nonces(text, str(path.relative_to(root))))
 
-    meta = {"files_inspected": inspected, "languages": languages, "finding_count": len(findings)}
+    def walk_error(error: OSError) -> None:
+        path = Path(error.filename) if error.filename else root
+        skipped.append({"file": str(path.relative_to(root)), "reason": "Directory could not be read"})
+
+    for directory, folders, files in os.walk(root, followlinks=False, onerror=walk_error):
+        kept = []
+        for folder in sorted(folders):
+            path = Path(directory) / folder
+            if folder in excluded_dirs:
+                continue
+            if path.is_symlink():
+                skipped.append({"file": str(path.relative_to(root)), "reason": "Linked directory skipped"})
+                continue
+            kept.append(folder)
+        folders[:] = kept
+        for filename in sorted(files):
+            path = Path(directory) / filename
+            lang = _file_language(path)
+            if lang is None or lang not in languages:
+                continue
+            relative = str(path.relative_to(root))
+            try:
+                if path.is_symlink() or not path.is_file():
+                    skipped.append({"file": relative, "reason": "Link or non-regular file skipped"})
+                    continue
+                # Bound the actual read, even if a file grows after metadata checks.
+                with path.open("rb") as stream:
+                    raw = stream.read(1_048_577)
+                if len(raw) > 1_048_576:
+                    skipped.append({"file": relative, "reason": "File exceeds 1 MiB"})
+                    continue
+                text = raw.decode("utf-8")
+            except (OSError, UnicodeError):
+                skipped.append({"file": relative, "reason": "File could not be read as UTF-8"})
+                continue
+            inspected += 1
+            file_findings = _scan_text(path, root, text)
+            if lang == "python":
+                file_findings.extend(check_python_aead_nonces(text, relative))
+            # Hash the exact input bytes; do not normalize line endings.
+            source_hash = hashlib.sha256(raw).hexdigest()
+            for finding in file_findings:
+                finding["evidence"]["source_sha256"] = source_hash
+            findings.extend(file_findings)
+
+    meta = {"files_inspected": inspected, "languages": languages, "finding_count": len(findings),
+            "skipped": skipped, "excluded_directories": sorted(excluded_dirs)}
+
     return {"findings": findings, "meta": meta, "findings_by_category": summarize(findings)}
 
 
@@ -162,3 +189,4 @@ if __name__ == "__main__":
     args = p.parse_args()
     res = scan_repo_for_crypto_issues(Path(args.root))
     print(json.dumps(res, indent=2))
+

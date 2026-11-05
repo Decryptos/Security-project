@@ -6,8 +6,10 @@ No literals, variable values, or source excerpts are included in evidence.
 from __future__ import annotations
 
 import ast
+import hashlib
 from pathlib import Path
 from typing import Any
+from decrypto_taxonomy import classify
 
 _AEAD = {"AESGCM", "ChaCha20Poly1305"}
 
@@ -41,6 +43,8 @@ def check_python_aead_nonces(source: str, file_label: str) -> list[dict[str, Any
     instances: set[str] = set()
     constants: dict[str, ast.AST] = {}
     findings: list[dict[str, Any]] = []
+    lines = source.splitlines()
+    source_sha256 = hashlib.sha256(source.encode("utf-8")).hexdigest()
 
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "cryptography.hazmat.primitives.ciphers.aead":
@@ -67,15 +71,26 @@ def check_python_aead_nonces(source: str, file_label: str) -> list[dict[str, Any
         nonce = node.args[0] if node.args else next((kw.value for kw in node.keywords if kw.arg == "nonce"), None)
         if nonce is None or not _literal_nonce(nonce, constants):
             continue
+        rule = "CRYPTO-AEAD-STATIC-NONCE"
+        # AST columns are UTF-8 byte offsets; expose a one-based character column
+        # consistent with the regex findings.
+        line = lines[node.lineno - 1]
+        column = len(line.encode("utf-8")[:node.col_offset].decode("utf-8")) + 1
+        target = f"{file_label}:{node.lineno}:{column}"
         findings.append({
-            "rule": "CRYPTO-AEAD-STATIC-NONCE",
-            "target": file_label,
+            "id": hashlib.sha256((rule + "|" + target).encode()).hexdigest()[:10].upper(),
+            "rule": rule,
+            "target": target,
             "title": "Statically fixed AEAD encryption nonce",
             "priority": "review",
             "status": "UNCONFIRMED — needs owner validation",
             "evidence_class": "static_code_finding",
-            "evidence": {"file": file_label, "line": node.lineno, "nonce_class": "syntactically fixed"},
+            "taxonomy": classify(rule),
+            "evidence": {"file": file_label, "line": node.lineno, "column": column,
+                         "source_sha256": source_sha256,
+                         "nonce_class": "syntactically fixed"},
             "remediation": "Ensure nonce uniqueness for every encryption under the same key; use a verified nonce-management design.",
             "validation_needed": "Owner must verify runtime nonce generation, key lifecycle, and whether the encrypt call is reachable.",
         })
     return findings
+

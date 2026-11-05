@@ -213,6 +213,20 @@ a verification result instead of derived key material. Reports still contain
 endpoint paths and selected metadata: do not put secrets in URL paths or assume
 all arbitrary server-provided metadata is automatically sanitized.
 
+Static source reports include file locations and SHA-256 digests of the exact
+input bytes, but no matched source excerpts or literal values. This replaces
+the former `match_excerpt` evidence field: consumers should use `file`, `line`,
+`column`, and `source_sha256` to inspect the local source. File names remain
+visible and should not contain secrets. AEAD nonce findings carry stable
+location-based IDs and taxonomy metadata, like other static findings.
+
+Static scan metadata includes `skipped` paths with reasons and the configured
+`excluded_directories`. Oversized files (over 1 MiB), unreadable or non-UTF-8
+source, and links are reported as skipped. Excluded dependency directories are
+pruned before traversal. Only Python and JavaScript source selected by the
+language filter is counted; a scan with no findings does not establish that
+skipped or excluded code is safe.
+
 Limitations and next steps
 
 - AEAD nonce analysis is source-only: it does not establish runtime key/nonce reuse and may miss aliases, helper functions, or complex control flow.
@@ -265,3 +279,4 @@ Leads remain unconfirmed; inherited HSTS, browser cookie rules, intended public
 operations and actual cache/CDN behavior require owner validation. Missing
 headers and contract declarations do not prove exploitable impact. Keep generated
 reports confidential and share only through the owner's approved disclosure channel.
+
