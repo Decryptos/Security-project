@@ -1,0 +1,11 @@
+{
+  "owner_record_url": "https://authorized.example.test/api/records/owner-test-record",
+  "other_record_url": "https://authorized.example.test/api/records/other-test-record",
+  "owner_marker": "REPLACE-WITH-UNIQUE-OWNER-MARKER",
+  "other_marker": "REPLACE-WITH-UNIQUE-OTHER-MARKER",
+  "owner_token_env": "DECRYPTO_OWNER_TOKEN",
+  "other_token_env": "DECRYPTO_OTHER_TOKEN",
+  "authorization_reference": "REPLACE-WITH-PROGRAM-SCOPE-AND-TEST-PERMISSION",
+  "synthetic_records": true,
+  "expected_policy": "owner-only"
+}

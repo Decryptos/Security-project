@@ -203,9 +203,52 @@ Repository administrators should require the CI and security checks in branch
 protection before merging. Workflow files alone do not enforce merge protection.
 CodeQL availability also depends on the repository's GitHub security settings.
 
-Authentication and sensitive output
+### Controlled cross-account read validation
 
-The auditor sends anonymous requests; it does not accept passwords, session
+`decrypto_access_validation.py` is a separate, opt-in validator for a specific
+access-control failure. It does not discover object IDs or exploit arbitrary
+findings. Use it only where the program permits authenticated testing with two
+accounts you control, against GET endpoints that have no side effects.
+
+1. Create one private synthetic record in account A and another in account B.
+   Give each a different unpredictable marker (16–256 UTF-8 bytes), stored in the
+   record content, not its URL. Confirm policy says each record is owner-only.
+2. Copy `examples/access-validation.json`. Supply both exact record URLs on the
+   same origin, the two markers, and the applicable permission reference.
+3. Set the named environment variables to the respective bearer credentials in
+   your local environment. Do not put credentials in JSON, command arguments,
+   source control, or reports.
+4. Run:
+
+```bash
+python decrypto_access_validation.py --config my-validation.json --authorized --out validation-result.json
+```
+
+The output file must not already exist. Keep your config and test-account
+mapping privately so you can reproduce the request sequence. Requests use GET
+and bearer authentication only: A reads A's record, B reads B's record,
+anonymous reads A's record, then B reads A's record. The sequence runs twice,
+with a one-second delay between requests, for at most eight requests.
+Failed controls stop the run early. No redirects, ID enumeration, state-changing
+requests, cookie storage, or proxy environment settings are used.
+
+| Result | Meaning |
+| --- | --- |
+| `reproduced_cross_account_read` | B retrieved A's synthetic marker twice; both own-record controls passed and anonymous requests were denied |
+| `not_reproduced` | Both cross-account probes were denied with passing controls |
+| `inconclusive` | Controls failed, responses were incomplete/redirected, or results were inconsistent |
+
+Reports retain role-labelled observations, statuses, byte counts and body hashes.
+They omit credentials, response bodies, markers, and raw URLs. Reads are bounded
+to 64 KiB plus one byte; oversized or encoded responses cannot establish success.
+URLs with query strings are currently unsupported. Ownership, different account
+identities, permission and intended policy remain operator assertions. A successful
+run demonstrates disclosure of the supplied synthetic marker; it does not identify
+the root cause, validate other exploit classes, or guarantee a bounty.
+
+### Authentication and sensitive output
+
+The main auditor sends anonymous requests; it does not accept passwords, session
 cookies or bearer tokens. `--authorized` is an operator permission assertion,
 not an authentication mechanism. URL validation errors do not echo rejected
 credential-bearing URLs. The standalone crypto demonstration prints sizes and
@@ -213,7 +256,51 @@ a verification result instead of derived key material. Reports still contain
 endpoint paths and selected metadata: do not put secrets in URL paths or assume
 all arbitrary server-provided metadata is automatically sanitized.
 
+Static source reports include file locations and SHA-256 digests of the exact
+input bytes, but no matched source excerpts or literal values. This replaces
+the former `match_excerpt` evidence field: consumers should use `file`, `line`,
+`column`, and `source_sha256` to inspect the local source. File names remain
+visible and should not contain secrets. AEAD nonce findings carry stable
+location-based IDs and taxonomy metadata, like other static findings.
+
+Static scan metadata includes `skipped` paths with reasons and the configured
+`excluded_directories`. Oversized files (over 1 MiB), unreadable or non-UTF-8
+source, and links are reported as skipped. Excluded dependency directories are
+pruned before traversal. Only Python and JavaScript source selected by the
+language filter is counted; a scan with no findings does not establish that
+skipped or excluded code is safe.
+
 Limitations and next steps
+
+### Additional Python bug-finding checks
+
+The offline repository scanner now includes four AST-based rule families:
+
+| Rule | Observed pattern | Safer control |
+| --- | --- | --- |
+| `PY-UNSAFE-DESERIALIZATION` | `pickle`, `_pickle`, or `dill` object loading | Data-only parsing such as `json.loads` |
+| `PY-UNSAFE-YAML` | Unsafe YAML APIs or `load/load_all` without a recognized safe loader | `safe_load`, `SafeLoader`, or `CSafeLoader` |
+| `PY-SHELL-EXECUTION` | `os.system/popen`, subprocess shell helpers, or explicit `shell=True` | Argument lists with `shell=False` |
+| `PY-DYNAMIC-EVALUATION` | Builtin `eval/exec`, including imported aliases | Constrained parsing or explicit dispatch |
+
+Run all existing crypto checks and these new Python checks together:
+
+```bash
+python decrypto_crypto_checks.py /path/to/authorized/local/source
+```
+
+No scanned source is imported or executed. New findings include CWE/category
+metadata, remediation, source locations, and hashes without source literals.
+Trusted uses of these APIs can be intentional; no input provenance, taint flow,
+exploitability, or runtime reachability is established.
+
+The new resolver recognizes unambiguous imports in module and function scopes.
+It suppresses rebound names conservatively and does not analyze class bodies,
+methods, or comprehension scopes. Star imports, dynamic imports, monkey-patching,
+wrapper functions, and complex control flow are not resolved. Safe alternatives
+in the table suppress these particular rules; they are not a general security
+guarantee. Syntax or AST resource errors are reported as partial coverage
+(`regex checks only`) rather than silently counted as complete AST analysis.
 
 - AEAD nonce analysis is source-only: it does not establish runtime key/nonce reuse and may miss aliases, helper functions, or complex control flow.
 - The static crypto checks are intentionally conservative regex-based heuristics, supplemented by a narrow Python AST rule.
@@ -265,3 +352,4 @@ Leads remain unconfirmed; inherited HSTS, browser cookie rules, intended public
 operations and actual cache/CDN behavior require owner validation. Missing
 headers and contract declarations do not prove exploitable impact. Keep generated
 reports confidential and share only through the owner's approved disclosure channel.
+

@@ -11,6 +11,10 @@ from typing import Any
 
 # rule prefix -> (category, subtype, CWE, OWASP 2021)
 TAXONOMY: dict[str, tuple[str, str, str, str]] = {
+    "PY-UNSAFE-DESERIALIZATION": ("unsafe-deserialization", "python-object-loading", "CWE-502", "A08"),
+    "PY-UNSAFE-YAML": ("unsafe-deserialization", "yaml-loader", "CWE-502", "A08"),
+    "PY-SHELL-EXECUTION": ("injection", "shell-command-execution", "CWE-78", "A03"),
+    "PY-DYNAMIC-EVALUATION": ("injection", "dynamic-code-evaluation", "CWE-95", "A03"),
     # Transport security
     "TLS-HSTS": ("transport-security", "missing-or-invalid-hsts", "CWE-319", "A02"),
     "TLS-CERT-EXPIRY": ("transport-security", "expired-certificate", "CWE-298", "A02"),
@@ -89,3 +93,4 @@ def summarize(findings: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
         bucket = summary.setdefault(tax["category"], {})
         bucket[tax["subtype"]] = bucket.get(tax["subtype"], 0) + 1
     return {cat: dict(sorted(sub.items())) for cat, sub in sorted(summary.items())}
+
