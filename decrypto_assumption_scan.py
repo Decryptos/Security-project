@@ -1018,6 +1018,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check-redirects", action="store_true", help="Probe common redirect parameters for unvalidated open-redirect reflection")
     parser.add_argument("--check-sensitive-paths", action="store_true", help="HEAD-probe a short list of well-known sensitive paths (.git/HEAD, .env, etc.)")
     parser.add_argument("--check-tls", action="store_true", help="Read TLS certificate expiry and negotiated protocol via one handshake per HTTPS URL")
+    parser.add_argument("--all-checks", action="store_true", help="Run every existing read-only check: CORS, redirect reflection, sensitive-path HEAD probes, and TLS. Does not add attack payloads.")
     parser.add_argument("--domain", help="Apex domain you are AUTHORIZED to test; discovers subdomains passively (crt.sh + DNS) and adds them to --url")
     parser.add_argument("--max-subdomains", type=int, default=5, help="Cap on subdomains added from --domain (1-15, default 5)")
     parser.add_argument("--openapi", type=Path, help="Optional LOCAL OpenAPI JSON specification to review offline")
@@ -1027,6 +1028,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=Path("decrypto_findings"), help="Report prefix; generates .json and .md")
     parser.add_argument("--scope", type=Path, help="Local JSON program scope. Live targets must match before any request; out-of-scope targets are refused.")
     args = parser.parse_args(argv)
+    if args.all_checks:
+        args.cors = True
+        args.verify_cors = True
+        args.check_redirects = True
+        args.check_sensitive_paths = True
+        args.check_tls = True
 
     scope = None
     discovery_skipped: list[dict[str, str]] = []
