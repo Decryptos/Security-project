@@ -188,6 +188,42 @@ def asset_label(finding: dict[str, Any]) -> str:
     return target
 
 
+def review_model(assumption: str, observation: str, falsifier: str, mechanism_observed: bool) -> dict[str, Any]:
+    """Record what the assumption model actually compared.
+
+    ``mechanism_observed`` means the configuration is visible in data the tool
+    already collected. ``impact_shown`` stays false: this comparison is not an
+    exploitability proof.
+    """
+    return {
+        "kind": "assumption",
+        "assumption": assumption,
+        "observation": observation,
+        "mechanism_observed": bool(mechanism_observed),
+        "impact_shown": False,
+        "falsifier": falsifier,
+    }
+
+
+def model_from_finding(finding: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a finding's model and refuse an impact claim."""
+    model = finding.get("model")
+    if isinstance(model, dict):
+        return review_model(
+            str(model.get("assumption") or finding.get("assumption_tested") or finding.get("title") or ""),
+            str(model.get("observation") or finding.get("how_model_found_it") or ""),
+            str(model.get("falsifier") or finding.get("validation_needed") or "Owner review is still required."),
+            bool(model.get("mechanism_observed")),
+        )
+    exploitability = finding.get("exploitability") or {}
+    return review_model(
+        str(finding.get("assumption_tested") or finding.get("title") or ""),
+        str(finding.get("how_model_found_it") or ""),
+        str(finding.get("validation_needed") or "Owner review is still required."),
+        bool(exploitability.get("directly_verifiable")) if isinstance(exploitability, dict) else False,
+    )
+
+
 def impact_assumption(finding: dict[str, Any]) -> str:
     text = finding.get("assumption_tested") or finding.get("title") or "The matched pattern needs review."
     return "Assumption, not confirmed impact: " + str(text)
@@ -232,6 +268,7 @@ def bounty_lead(finding: dict[str, Any], program_asset: str | None = None) -> di
         "reproduction_notes": reproduction_notes(finding),
         "remediation": finding.get("remediation"),
         "validation_needed": finding.get("validation_needed"),
+        "model": model_from_finding(finding),
         "exploitability": redact(finding.get("exploitability")) if finding.get("exploitability") else None,
     }
 
@@ -341,17 +378,14 @@ def render_bounty_markdown(result: dict[str, Any]) -> str:
             "",
             str(lead.get("validation_needed") or "Owner review is still required."),
             "",
+            "### Model",
+            "",
+            f"Mechanism observed: {'yes' if (lead.get('model') or {}).get('mechanism_observed') else 'no'}. "
+            "Impact shown: no. A visible configuration is not an exploitability proof.",
+            "",
+            "What would falsify this lead: " + str((lead.get("model") or {}).get("falsifier") or lead.get("validation_needed") or ""),
+            "",
         ]
-        exploitability = lead.get("exploitability")
-        if isinstance(exploitability, dict):
-            lines += [
-                "### What the observation does and does not show",
-                "",
-                "The recorded metadata shows this configuration directly: "
-                f"`{exploitability.get('method')}`. It does not by itself establish attacker impact. "
-                f"Further review: {exploitability.get('requires_additional_testing')}",
-                "",
-            ]
     for number, item in enumerate(result.get("correlated_assumption_hypotheses") or [], 1):
         lines += [
             f"## Correlated hypothesis {number}: {item.get('title')}",

@@ -61,7 +61,12 @@ class TestLiveChecks(unittest.TestCase):
         self.assertTrue(by_rule["OPEN-REDIRECT"]["exploitability"]["directly_verifiable"])
         self.assertFalse(by_rule["SENSITIVE-PATH-EXPOSED"]["exploitability"]["directly_verifiable"])
         self.assertTrue(all(f["status"].startswith("UNCONFIRMED") for f in result["findings"]))
-        self.assertIn("Exploitability verification", scan_mod.markdown_report(result))
+        report = scan_mod.markdown_report(result)
+        self.assertIn("**Impact shown:** no", report)
+        self.assertNotIn("Exploitability verification: YES", report)
+        self.assertTrue(by_rule["OPEN-REDIRECT"]["model"]["mechanism_observed"])
+        self.assertFalse(by_rule["OPEN-REDIRECT"]["model"]["impact_shown"])
+        self.assertFalse(by_rule["SENSITIVE-PATH-EXPOSED"]["model"]["mechanism_observed"])
 
 
 class TestSecurityHeaders(unittest.TestCase):

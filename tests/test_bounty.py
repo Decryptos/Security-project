@@ -331,6 +331,16 @@ class TestBountyWorkflow(unittest.TestCase):
         self.assertEqual(lead["evidence"]["password"], "redacted")
         self.assertNotIn("super-secret", json.dumps(lead))
         self.assertFalse(lead["confirmed_vulnerability"])
+        self.assertFalse(lead["model"]["impact_shown"])
+
+    def test_model_rejects_an_impact_claim(self):
+        from decrypto_bounty import model_from_finding
+        model = model_from_finding({
+            "title": "Example",
+            "model": {"assumption": "A", "observation": "B", "falsifier": "C", "mechanism_observed": True, "impact_shown": True},
+        })
+        self.assertTrue(model["mechanism_observed"])
+        self.assertFalse(model["impact_shown"])
 
 
 if __name__ == "__main__":
