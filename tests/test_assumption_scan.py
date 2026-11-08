@@ -65,6 +65,13 @@ def test_normalize_url_allows_http_localhost():
     assert result == "http://localhost/path"
 
 
+def test_juice_shop_browser_fragment_is_not_sent():
+    """A local Juice Shop URL copied from the browser drops the hash route."""
+    assert normalize_url("http://localhost:3000/#/score-board") == "http://localhost:3000/"
+    assert normalize_url("http://127.0.0.1:3000/#/") == "http://127.0.0.1:3000/"
+    assert normalize_url("http://[::1]:3000/#/login") == "http://[::1]:3000/"
+
+
 def test_validate_url_delegates_to_normalize():
     """Test that validate_url delegates to normalize_url."""
     url = "https://example.com/path"

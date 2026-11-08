@@ -64,8 +64,10 @@ def normalize_url(url: str) -> str:
         raise ValueError("Invalid HTTP(S) URL")
     if p.username or p.password:
         raise ValueError("URLs must not contain credentials")
-    if p.query or p.fragment:
-        raise ValueError("URLs must not include query or fragment")
+    if p.query:
+        raise ValueError("URLs must not include a query string")
+    # Fragments are not sent to the server. A browser URL such as
+    # http://localhost:3000/#/ is scanned as http://localhost:3000/ only.
     if p.path.startswith("//"):
         raise ValueError("Path must not start with double slash")
     if p.hostname.endswith("."):
