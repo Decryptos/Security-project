@@ -343,6 +343,42 @@ class TestBountyWorkflow(unittest.TestCase):
         self.assertFalse(model["impact_shown"])
 
 
+class _LocalReviewFixture(BaseHTTPRequestHandler):
+    """Loopback stand-in for exercising every existing read-only check."""
+
+    seen = []
+
+    def do_HEAD(self):
+        self.seen.append(self.path)
+        if self.path in ("/", "/.git/HEAD", "/.env"):
+            self.send_response(200)
+            if self.path == "/":
+                self.send_header("Set-Cookie", "sessionid=synthetic; Path=/")
+                self.send_header("Server", "fixture/1.2.3")
+        else:
+            self.send_response(404)
+        self.end_headers()
+
+    def do_GET(self):
+        self.seen.append(self.path)
+        if "redirect=" in self.path:
+            self.send_response(302)
+            query = self.path.split("?", 1)[1]
+            self.send_header("Location", query.split("=", 1)[1])
+            self.end_headers()
+            return
+        origin = self.headers.get("Origin")
+        self.send_response(200)
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Credentials", "true")
+        self.end_headers()
+        self.wfile.write(b"local-juice-shop-fixture-body")
+
+    def log_message(self, *_args):
+        pass
+
+
 class _JuiceShopFixture(BaseHTTPRequestHandler):
     seen = []
 
@@ -414,6 +450,44 @@ class TestLocalJuiceShopUrl(unittest.TestCase):
                 self.assertEqual(report["scope"], ["http://127.0.0.1:3000/"])
                 self.assertTrue(report["findings"])
                 self.assertTrue(all(item["status"].startswith("UNCONFIRMED") for item in report["findings"]))
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=3)
+
+    def test_all_checks_exercise_every_existing_live_family(self):
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", 3000), _LocalReviewFixture)
+        except OSError:
+            self.skipTest("127.0.0.1:3000 is already in use")
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        _LocalReviewFixture.seen = []
+        worker.start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                prefix = Path(tmp) / "juice_shop_review"
+                run = subprocess.run(
+                    [sys.executable, str(ROOT / "decrypto_assumption_scan.py"),
+                     "--scope", str(ROOT / "examples" / "bounty-scope.juice-shop.local.json"),
+                     "--url", "http://127.0.0.1:3000/",
+                     "--authorized", "--all-checks", "--delay", "0.5", "--timeout", "5",
+                     "--out", str(prefix)],
+                    capture_output=True, text=True, timeout=40,
+                )
+                self.assertEqual(run.returncode, 0, run.stderr)
+                report = json.loads(prefix.with_suffix(".json").read_text(encoding="utf-8"))
+                rendered = json.dumps(report) + prefix.with_suffix(".bounty.md").read_text(encoding="utf-8")
+                rules = {item["rule"] for item in report["findings"]}
+                for rule in ("SESSION-COOKIE-1", "SERVER-BANNER", "CLICKJACK-HEADERS",
+                             "CORS-TRUST", "OPEN-REDIRECT", "SENSITIVE-PATH-EXPOSED"):
+                    self.assertIn(rule, rules)
+                self.assertIn("SQL/command/template injection payloads", report["not_tested"])
+                self.assertNotIn("local-juice-shop-fixture-body", rendered)
+                self.assertTrue(all(item["status"].startswith("UNCONFIRMED") for item in report["findings"]))
+                paths = set(_LocalReviewFixture.seen)
+                self.assertIn("/", paths)
+                self.assertTrue(any(path.startswith("/.git/") or path.startswith("/.env") for path in paths))
+                self.assertTrue(any("redirect=" in path for path in paths))
         finally:
             server.shutdown()
             server.server_close()
