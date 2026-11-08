@@ -1,0 +1,14 @@
+title = "Decrypto"
+
+# Keep the default rule set. This file only ignores two synthetic hex
+# literals that detector tests committed before they were split into short pieces.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Exact synthetic hex literals from hardcoded-secret detector tests"
+regexTarget = "secret"
+regexes = [
+    '''^abcdef0123456789abcdef0123456789abcdef99$''',
+    '''^abcdef0123456789abcdef0123456789abcdef012345$''',
+]
