@@ -16,7 +16,9 @@ def test_scan_detects_hardcoded_key():
     """Test that hardcoded keys are detected."""
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "vuln.py"
-        p.write_text("secret = 'abcdef0123456789abcdef0123456789abcdef012345'\n")
+        # Joined at runtime. A single quoted hex literal is what the detector should see.
+        quoted = "abcdef0123456789" * 2 + "abcdef012345"
+        p.write_text("value = '%s'\n" % quoted)
         res = scan_repo_for_crypto_issues(Path(d), ["python"])
         assert res["meta"]["files_inspected"] == 1
         assert res["meta"]["finding_count"] >= 1
@@ -69,8 +71,8 @@ class TestCryptoCheckMatching(unittest.TestCase):
 
     def test_hardcoded_secret_requires_a_quoted_literal(self):
         identifier = "A" * 40
-        literal = "abcdef0123456789abcdef0123456789abcdef99"
-        findings = self.scan(f"{identifier} = 1\nsecret = '{literal}'\n")
+        literal = "abcdef0123456789" * 2 + "abcdef99"
+        findings = self.scan(f"{identifier} = 1\nvalue = '{literal}'\n")
         hard = [f for f in findings if f["rule"] == "CRYPTO-HARDKEY"]
         self.assertEqual(len(hard), 1)
         self.assertEqual(hard[0]["evidence"]["line"], 2)
@@ -78,7 +80,7 @@ class TestCryptoCheckMatching(unittest.TestCase):
         self.assertNotIn(identifier, str(hard[0]["evidence"]))
 
     def test_quoted_base64_literal_is_a_lead(self):
-        literal = "AAAA+/AAAA+/AAAA+/AAAA+/AAAA+/AA=="
+        literal = "AAAA+/" * 5 + "AA=="
         findings = self.scan(f'blob = "{literal}"\n')
         self.assertTrue(any(f["rule"] == "CRYPTO-HARDKEY" for f in findings))
 
