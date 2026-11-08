@@ -156,15 +156,19 @@ python3 decrypto_assumption_scan.py \
   --scope examples/bounty-scope.juice-shop.local.json \
   --url http://127.0.0.1:3000/ \
   --authorized \
+  --all-checks \
   --delay 0.5 \
   --out juice_shop_review
 ```
 
-The run is the same read-only header and status review as any other
-authorized URL. It does not submit Juice Shop challenges, send attack
-payloads, or turn leads into confirmed vulnerabilities. Juice Shop often
-answers 200 for unknown paths, so a sensitive-path lead still needs you to
-confirm the response in your local session.
+`--all-checks` runs every read-only check Decrypto already has: response
+headers, cookie flags, paired CORS observations, redirect-parameter
+reflection, and HEAD probes of well-known sensitive paths. TLS is included
+and applies only when the URL is HTTPS. Leads stay unconfirmed. This does
+not submit Juice Shop challenges and does not send injection, XSS, or
+access-bypass payloads. Juice Shop often answers 200 for unknown paths, so
+a sensitive-path lead still needs you to confirm the response in your local
+session.
 
 An explicit URL outside the scope is refused before any request is sent.
 Sensitive-path and redirect probes that fall outside the scope are skipped and
