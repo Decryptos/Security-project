@@ -1,0 +1,13 @@
+{
+  "program": "Local OWASP Juice Shop — an instance you started yourself",
+  "in_scope": [
+    "http://127.0.0.1:3000",
+    "http://localhost:3000",
+    "http://[::1]:3000"
+  ],
+  "out_of_scope": [
+    "https://juice-shop.herokuapp.com",
+    "https://demo.owasp-juice.shop"
+  ],
+  "notes": "Loopback port 3000 only. Do not point Decrypto at a public Juice Shop demo or any host you are not allowed to test."
+}

@@ -343,5 +343,82 @@ class TestBountyWorkflow(unittest.TestCase):
         self.assertFalse(model["impact_shown"])
 
 
+class _JuiceShopFixture(BaseHTTPRequestHandler):
+    seen = []
+
+    def do_HEAD(self):
+        self.seen.append(self.path)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+
+    def do_GET(self):
+        self.seen.append(self.path)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        self.wfile.write(b"local-juice-shop-fixture-body")
+
+    def log_message(self, *_args):
+        pass
+
+
+class TestLocalJuiceShopUrl(unittest.TestCase):
+    def test_checked_in_scope_is_port_3000_loopback_only(self):
+        scope = load_scope(ROOT / "examples" / "bounty-scope.juice-shop.local.json")
+        self.assertTrue(scope.allows("http://127.0.0.1:3000/"))
+        self.assertTrue(scope.allows("http://localhost:3000/#/score-board"))
+        self.assertTrue(scope.allows("http://[::1]:3000/rest/admin"))
+        self.assertFalse(scope.allows("http://127.0.0.1:3001/"))
+        self.assertFalse(scope.allows("https://juice-shop.herokuapp.com/"))
+        self.assertFalse(scope.allows("https://demo.owasp-juice.shop/"))
+
+    def test_public_demo_is_refused_before_a_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            refused = Path(tmp) / "refused"
+            denied = subprocess.run(
+                [sys.executable, str(ROOT / "decrypto_assumption_scan.py"),
+                 "--scope", str(ROOT / "examples" / "bounty-scope.juice-shop.local.json"),
+                 "--url", "https://juice-shop.herokuapp.com/",
+                 "--authorized", "--delay", "0.5", "--out", str(refused)],
+                capture_output=True, text=True, timeout=15,
+            )
+            self.assertNotEqual(denied.returncode, 0, denied.stdout)
+            self.assertIn("out-of-scope", denied.stderr.lower())
+            self.assertFalse(refused.with_suffix(".json").exists())
+
+    def test_cli_scans_browser_url_on_local_port_3000(self):
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", 3000), _JuiceShopFixture)
+        except OSError:
+            self.skipTest("127.0.0.1:3000 is already in use")
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        _JuiceShopFixture.seen = []
+        worker.start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                prefix = Path(tmp) / "juice_shop_review"
+                run = subprocess.run(
+                    [sys.executable, str(ROOT / "decrypto_assumption_scan.py"),
+                     "--scope", str(ROOT / "examples" / "bounty-scope.juice-shop.local.json"),
+                     "--url", "http://127.0.0.1:3000/#/score-board",
+                     "--authorized", "--delay", "0.5", "--out", str(prefix)],
+                    capture_output=True, text=True, timeout=20,
+                )
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertEqual(_JuiceShopFixture.seen, ["/"])
+                report = json.loads(prefix.with_suffix(".json").read_text(encoding="utf-8"))
+                rendered = json.dumps(report) + prefix.with_suffix(".md").read_text(encoding="utf-8")
+                rendered += prefix.with_suffix(".bounty.md").read_text(encoding="utf-8")
+                self.assertNotIn("local-juice-shop-fixture-body", rendered)
+                self.assertEqual(report["scope"], ["http://127.0.0.1:3000/"])
+                self.assertTrue(report["findings"])
+                self.assertTrue(all(item["status"].startswith("UNCONFIRMED") for item in report["findings"]))
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=3)
+
+
 if __name__ == "__main__":
     unittest.main()

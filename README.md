@@ -98,7 +98,8 @@ The scanner sends a HEAD request per public URL and optionally an additional
 GET with a harmless Origin header for `--cors`. A declared private URL uses
 an anonymous GET instead of HEAD. It never follows redirects or stores response
 bodies. HTTPS is required for non-loopback targets; query strings and embedded
-credentials are rejected. The command limits requests and adds delays.
+credentials are rejected. A fragment is discarded because the browser does not
+send it. The command limits requests and adds delays.
 
 **Offline website test, without touching an external service:**
 
@@ -139,6 +140,31 @@ python3 decrypto_assumption_scan.py \
   --delay 0.5 \
   --out bounty_review
 ```
+
+### Local OWASP Juice Shop
+
+Use this only for a Juice Shop process you started yourself, usually at
+`http://127.0.0.1:3000/` or `http://localhost:3000/`. The checked-in scope
+allows those loopback origins on port 3000 and nothing else. A public demo
+host is out of scope and is refused before any request. If your instance
+uses another port, change the port in a copy of the scope file. Paste the
+browser URL if you want; `http://localhost:3000/#/score-board` is scanned as
+`http://localhost:3000/` because the fragment is not sent.
+
+```bash
+python3 decrypto_assumption_scan.py \
+  --scope examples/bounty-scope.juice-shop.local.json \
+  --url http://127.0.0.1:3000/ \
+  --authorized \
+  --delay 0.5 \
+  --out juice_shop_review
+```
+
+The run is the same read-only header and status review as any other
+authorized URL. It does not submit Juice Shop challenges, send attack
+payloads, or turn leads into confirmed vulnerabilities. Juice Shop often
+answers 200 for unknown paths, so a sensitive-path lead still needs you to
+confirm the response in your local session.
 
 An explicit URL outside the scope is refused before any request is sent.
 Sensitive-path and redirect probes that fall outside the scope are skipped and
