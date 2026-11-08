@@ -346,12 +346,12 @@ def security_header_checks(url: str, status: int, headers: Message) -> list[dict
     actually exploitable still depends on page content the tool never reads.
     """
     findings: list[dict[str, Any]] = []
-    if status >= 400:
+    if not 200 <= status < 300:
         return findings
 
     frame_options = (headers.get("X-Frame-Options") or "").strip()
-    csp = headers.get("Content-Security-Policy") or ""
-    if not frame_options and "frame-ancestors" not in csp.lower():
+    csp_values = headers.get_all("Content-Security-Policy", [])
+    if not frame_options and not any("frame-ancestors" in policy.lower() for policy in csp_values):
         findings.append(new_finding(
             "CLICKJACK-HEADERS",
             url,
@@ -389,6 +389,7 @@ def security_header_checks(url: str, status: int, headers: Message) -> list[dict
         ))
 
     banner = " ".join(filter(None, [headers.get("Server"), headers.get("X-Powered-By")])).strip()
+    banner = re.sub(r"[`\x00-\x1f\x7f]", "", banner)
     if re.search(r"\d+\.\d+(\.\d+)?", banner):
         findings.append(new_finding(
             "SERVER-BANNER",
@@ -429,8 +430,16 @@ def header_variant_checks(url: str, status: int, headers: Message) -> list[dict[
     """Variant-level header findings: CSP weaknesses, referrer/permissions policy, framework banners, CORS wildcard."""
     findings: list[dict[str, Any]] = []
     csp_values = headers.get_all("Content-Security-Policy", [])
-    csp = {part.strip().split(None, 1)[0].lower(): (part.strip().split(None, 1)[1] if " " in part.strip() else "")
-           for value in csp_values for part in value.split(";") if part.strip()}
+    # CSP headers are enforced independently. Retain all policies and
+    # ignore duplicate directives after the first occurrence in each policy.
+    policies = []
+    for value in csp_values:
+        directives = {}
+        for part in value.split(";"):
+            tokens = part.strip().split(None, 1)
+            if tokens:
+                directives.setdefault(tokens[0].lower(), tokens[1] if len(tokens) > 1 else "")
+        policies.append(directives)
 
     if not csp_values:
         findings.append(_header_finding(
@@ -440,36 +449,42 @@ def header_variant_checks(url: str, status: int, headers: Message) -> list[dict[
             "Add a restrictive Content-Security-Policy (default-src 'self' plus nonces/hashes for scripts).",
             "CSP is defence in depth; confirm whether the page handles untrusted content before treating it as risk."))
     else:
-        script_src = (csp.get("script-src") or csp.get("default-src") or "").lower()
-        if "'unsafe-inline'" in script_src and "'nonce-" not in script_src and "'strict-dynamic'" not in script_src:
+        # Require all enforced policies to allow the risky construct.
+        script_sources = [(p["script-src"] if "script-src" in p else p.get("default-src", "")).lower()
+                          for p in policies]
+        if all("'unsafe-inline'" in src and "'nonce-" not in src and "'strict-dynamic'" not in src
+               for src in script_sources):
             findings.append(_header_finding(
                 "CSP-UNSAFE-INLINE", url, "CSP allows unsafe-inline scripts",
                 "A CSP should block inline script execution.",
                 {"status": status, "directive": "script-src/default-src", "token": "'unsafe-inline'"},
                 "Remove 'unsafe-inline'; use nonces or hashes.",
                 "Weakens XSS mitigation only; it is not itself an XSS vulnerability.", "review"))
-        if "'unsafe-eval'" in script_src:
+        if all("'unsafe-eval'" in src for src in script_sources):
             findings.append(_header_finding(
                 "CSP-UNSAFE-EVAL", url, "CSP allows unsafe-eval",
                 "A CSP should block string-to-code evaluation.",
                 {"status": status, "directive": "script-src/default-src", "token": "'unsafe-eval'"},
                 "Remove 'unsafe-eval' and refactor code that needs eval().",
                 "Weakens XSS mitigation only; it is not itself an XSS vulnerability."))
-        wide = [tok for tok in script_src.split() if tok in ("*", "https:", "http:", "data:")]
+        wide_tokens = {"*", "https:", "http:", "data:"}
+        wide = set.intersection(*(set(src.split()) & wide_tokens for src in script_sources))
         if wide:
             findings.append(_header_finding(
                 "CSP-WILDCARD-SOURCE", url, "CSP script source allows a wildcard or whole scheme",
                 "Script sources should be an explicit allowlist.",
-                {"status": status, "directive": "script-src/default-src", "tokens": sorted(set(wide))},
+                {"status": status, "directive": "script-src/default-src", "tokens": sorted(wide)},
                 "Replace wildcard/scheme sources with specific origins, nonces or hashes.",
                 "Check whether any allowed origin lets attackers host script (JSONP, open buckets).", "review"))
-        missing = [d for d in ("object-src", "base-uri") if d not in csp]
+        # object-src falls back to default-src; base-uri has no fallback.
+        missing = [d for d in ("object-src", "base-uri")
+                   if all(d not in p and (d != "object-src" or "default-src" not in p) for p in policies)]
         if missing:
             findings.append(_header_finding(
-                "CSP-MISSING-DIRECTIVES", url, "CSP lacks object-src and/or base-uri",
-                "These directives do not fall back to default-src and are common CSP bypass paths.",
+                "CSP-MISSING-DIRECTIVES", url, "CSP lacks effective object-src and/or base-uri",
+                "object-src falls back to default-src; base-uri does not.",
                 {"status": status, "missing_directives": missing},
-                "Add object-src 'none' and base-uri 'self'.",
+                "Set object-src 'none' (or a restrictive default-src) and base-uri 'self'/'none'.",
                 "Defence-in-depth gap; confirm with the owner."))
 
     referrer = (headers.get("Referrer-Policy") or "").strip().lower()
@@ -614,6 +629,16 @@ def tls_checks(hostname: str, port: int, timeout: float) -> list[dict[str, Any]]
             with context.wrap_socket(sock, server_hostname=hostname) as tls_sock:
                 cert = tls_sock.getpeercert()
                 protocol = tls_sock.version()
+    except ssl.SSLCertVerificationError as exc:
+        findings.append(new_finding(
+            "TLS-CERT-VERIFY", target, "TLS certificate verification failed",
+            "An HTTPS server should present a currently trusted certificate.",
+            {"verify_code": getattr(exc, "verify_code", None),
+             "verify_message": str(getattr(exc, "verify_message", "") or "")[:160]},
+            "A verified TLS handshake rejected the certificate.",
+            "Inspect certificate validity, trust chain and configured hostname.",
+            "Owner should verify the reason and affected clients.", "review"))
+        return findings
     except (OSError, ssl.SSLError, socket.timeout):
         return findings
 
@@ -794,8 +819,8 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
         if rejected:
             raise ValueError("Out-of-scope targets refused before any request: " + ", ".join(rejected))
 
-    if verify_cors and len(normalized_urls) > 8:
-        raise ValueError("Paired CORS verification is limited to 8 URLs and 24 total requests")
+    if verify_cors and len(normalized_urls) > max_urls:
+        raise ValueError("Paired CORS verification exceeds the allowed URL count")
     normalized_private_urls = {validate_url(u) for u in private_urls}
     if not normalized_private_urls.issubset(set(normalized_urls)):
         raise ValueError("Every --private-url must be included in --url")

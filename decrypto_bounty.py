@@ -64,6 +64,8 @@ class ScopeEntry:
     path_mode: str
     raw: str
 
+    # Host-only entries intentionally cover both schemes and all ports.
+    # Use URL entries for a precise scheme/port boundary.
     def matches(self, scheme: str, host: str, port: int | None, path: str) -> bool:
         if not _host_matches(self.host, host):
             return False
@@ -77,8 +79,8 @@ class ScopeEntry:
             base = self.path.rstrip("/") or "/"
             if base == "/":
                 return True
-            return path == base or path.startswith(base + "/")
-        return path == self.path
+            return path.casefold() == base.casefold() or path.casefold().startswith(base.casefold() + "/")
+        return path.casefold() == self.path.casefold()
 
 
 @dataclass(frozen=True)
@@ -310,11 +312,11 @@ def render_bounty_markdown(result: dict[str, Any]) -> str:
         "",
         f"**Scope SHA-256:** `{bounty.get('scope_sha256')}`",
         "",
-        "**In-scope rules:** " + ", ".join(f"`{item}`" for item in bounty.get("in_scope", [])) or "(none)",
+        "**In-scope rules:** " + (", ".join(f"`{item}`" for item in bounty.get("in_scope", [])) or "(none)"),
         "",
-        "**Out-of-scope rules:** " + ", ".join(f"`{item}`" for item in bounty.get("out_of_scope", [])) or "(none)",
+        "**Out-of-scope rules:** " + (", ".join(f"`{item}`" for item in bounty.get("out_of_scope", [])) or "(none)"),
         "",
-        "**Assets requested:** " + ", ".join(f"`{item}`" for item in bounty.get("targets_requested", [])) or "(none)",
+        "**Assets requested:** " + (", ".join(f"`{item}`" for item in bounty.get("targets_requested", [])) or "(none)"),
         "",
     ]
     if bounty.get("notes"):
