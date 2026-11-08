@@ -231,7 +231,11 @@ def _nonce_arg(node: ast.Call) -> ast.AST | None:
 def _consider_encrypt(node: ast.Call, scopes: list[_Scope], emit: Any) -> None:
     if not isinstance(node.func, ast.Attribute) or node.func.attr != "encrypt":
         return
-    if not isinstance(node.func.value, ast.Name) or not _is_instance(scopes, node.func.value.id):
+    receiver = node.func.value
+    known_instance = isinstance(receiver, ast.Name) and _is_instance(scopes, receiver.id)
+    direct_instance = (isinstance(receiver, ast.Call) and isinstance(receiver.func, ast.Name)
+                       and _is_constructor(scopes, receiver.func.id))
+    if not (known_instance or direct_instance):
         return
     nonce = _nonce_arg(node)
     if nonce is None or not _static_nonce(nonce, scopes):
@@ -434,12 +438,17 @@ def _walk_stmt(stmt: ast.stmt, scopes: list[_Scope], emit: Any) -> None:
             _walk_stmt(child, scopes, emit)
         for handler in stmt.handlers:
             _walk_expr(handler.type, scopes, emit)
-            scopes.append(_Scope())
+            # Exception handler assignments live in the containing function scope.
+            # Restore the pre-try state before visiting a possible handler path.
+            before_handler = _snapshot(scopes[-1])
             if handler.name:
                 _bind_dynamic(scopes[-1], handler.name)
             for child in handler.body:
                 _walk_stmt(child, scopes, emit)
-            scopes.pop()
+            if handler.name:
+                _bind_dynamic(scopes[-1], handler.name)
+            # Preserve existing conservative behavior outside the handler.
+            _restore(scopes[-1], before_handler)
         for child in stmt.orelse + stmt.finalbody:
             _walk_stmt(child, scopes, emit)
     elif _MATCH is not None and isinstance(stmt, _MATCH):
