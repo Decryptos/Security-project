@@ -89,6 +89,27 @@ def test_new_finding_creates_valid_structure():
     assert finding["target"] == "https://example.com"
     assert finding["title"] == "Test Finding"
     assert len(finding["id"]) == 10
+    assert finding["model"]["impact_shown"] is False
+    assert finding["model"]["mechanism_observed"] is False
+    assert finding["model"]["falsifier"] == "Test verification"
+
+
+def test_visible_mechanism_does_not_show_impact():
+    """A directly visible configuration stays an unconfirmed lead."""
+    finding = new_finding(
+        rule="TLS-HSTS",
+        url="https://example.com/",
+        title="HSTS absent",
+        assumption="HTTPS should enforce HSTS.",
+        evidence={"strict_transport_security": "absent"},
+        reasoning="The header was absent.",
+        fix="Set HSTS.",
+        verification="Check inherited policy.",
+        exploitability={"directly_verifiable": True, "method": "header_absence", "requires_additional_testing": "Owner review"},
+    )
+    assert finding["model"]["mechanism_observed"] is True
+    assert finding["model"]["impact_shown"] is False
+    assert finding["status"].startswith("UNCONFIRMED")
 
 
 def test_cookie_metadata_empty_headers():

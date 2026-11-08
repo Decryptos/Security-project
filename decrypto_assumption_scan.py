@@ -24,7 +24,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPHandler, HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
-from decrypto_bounty import ProgramScope, load_scope, package_bounty, render_bounty_markdown
+from decrypto_bounty import ProgramScope, load_scope, package_bounty, render_bounty_markdown, review_model
 from decrypto_taxonomy import classify, summarize
 from decrypto_validation import ORIGINS, evaluate_cors_pair, metadata
 
@@ -112,12 +112,11 @@ def new_finding(rule: str, url: str, title: str, assumption: str,
                 priority: str = "review", exploitability: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build a finding.
 
-    `exploitability`, when provided, states — in a conservative, falsifiable way —
-    whether the *observed response data alone* (never an attack payload) already
-    confirms the mechanism, or whether further owner-authorized testing is still
-    required before any impact claim. It never upgrades `status`, which always
-    stays UNCONFIRMED until the owner validates real-world impact.
+    `exploitability`, when provided, records whether the configuration is visible
+    in data already collected. It does not show attacker impact. `model.impact_shown`
+    stays false, and `status` stays UNCONFIRMED.
     """
+    mechanism_observed = bool(exploitability and exploitability.get("directly_verifiable"))
     finding = {
         "id": hashlib.sha256(_finding_material(rule, url, evidence).encode()).hexdigest()[:10].upper(),
         "rule": rule,
@@ -132,6 +131,7 @@ def new_finding(rule: str, url: str, title: str, assumption: str,
         "remediation": fix,
         "validation_needed": verification,
         "taxonomy": classify(rule),
+        "model": review_model(assumption, reasoning, verification, mechanism_observed),
     }
     if exploitability is not None:
         finding["exploitability"] = exploitability
@@ -634,7 +634,7 @@ def tls_checks(hostname: str, port: int, timeout: float) -> list[dict[str, Any]]
                     "Renew the certificate and confirm automated renewal (e.g., ACME) is configured.",
                     "Directly verifiable from the certificate itself; no further testing needed.",
                     "high" if days_left < 0 else "review",
-                    exploitability={"directly_verifiable": True, "method": "tls_certificate_metadata", "requires_additional_testing": "No"},
+                    exploitability={"directly_verifiable": True, "method": "tls_certificate_metadata", "requires_additional_testing": "The handshake shows the certificate date. Client and deployment impact still need owner review."},
                 ))
 
     if protocol in WEAK_TLS_PROTOCOLS:
@@ -648,7 +648,7 @@ def tls_checks(hostname: str, port: int, timeout: float) -> list[dict[str, Any]]
             "Disable SSLv2/SSLv3/TLS1.0/TLS1.1 on the server and require TLS 1.2+.",
             "Directly verifiable from the handshake itself; no further testing needed.",
             "high",
-            exploitability={"directly_verifiable": True, "method": "tls_handshake_metadata", "requires_additional_testing": "No"},
+            exploitability={"directly_verifiable": True, "method": "tls_handshake_metadata", "requires_additional_testing": "The handshake shows the negotiated protocol. Client impact still needs owner review."},
         ))
 
     return findings
@@ -954,15 +954,13 @@ def markdown_report(result: dict[str, Any]) -> str:
             "**Evidence required before a vulnerability report:** " + finding["validation_needed"],
             "",
         ]
-        exploitability = finding.get("exploitability")
-        if exploitability is not None:
-            verified = "YES — response data alone confirms this mechanism" if exploitability.get("directly_verifiable") else "No — further owner-authorized testing required"
-            lines += [
-                f"**Exploitability verification:** {verified} (method: `{exploitability.get('method')}`)",
-                "",
-                f"**Further testing required:** {exploitability.get('requires_additional_testing')}",
-                "",
-            ]
+        model = finding.get("model") or {}
+        lines += [
+            f"**Model:** assumption versus observation. **Mechanism observed:** {'yes' if model.get('mechanism_observed') else 'no'}. **Impact shown:** no.",
+            "",
+            "**What would falsify this lead:** " + str(model.get("falsifier") or finding["validation_needed"]),
+            "",
+        ]
         lines += [
             "**Reproduction scope:** Credential-free HEAD/GET observations (up to two harmless Origin probes), or offline local contract inspection, limited to the explicitly authorized URL. No payloads or sensitive elements were stored.",
             "",

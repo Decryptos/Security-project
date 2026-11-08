@@ -198,11 +198,7 @@ environment files, cloud credentials, backups, debug endpoints), and static cryp
 hardcoded IV/nonce). This is a bounded, passive rule set, not every possible bug class; it
 does not cover injection, XSS, IDOR or logic flaws, which need authorized manual testing.
 
-Exploitability verification: header, redirect, sensitive-path and TLS findings carry an optional `exploitability` object. It
-states whether the response data alone proves the mechanism, and what further
-owner-authorized testing is still needed. Status stays UNCONFIRMED until the owner
-validates real-world impact. The tool still sends no injection/XSS/SQLi payloads,
-brute-force, IDOR, or load tests.
+The assumption model on each lead records the assumption, the observation, whether that configuration is visible in the collected data (`mechanism_observed`), and what would falsify the lead. `impact_shown` is false. A visible header, redirect, certificate, or source pattern is not an exploitability proof. Status stays UNCONFIRMED until the owner validates real-world impact. The tool still sends no injection/XSS/SQLi payloads, brute-force, IDOR, or load tests.
 
 Important safety and privacy constraints
 
