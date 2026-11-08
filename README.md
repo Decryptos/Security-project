@@ -41,7 +41,7 @@ Supported checks (snapshot static analysis)
 The static crypto checks are heuristics that report leads for manual review. They
 include but are not limited to:
 
-- Hardcoded-looking long hex/base64 strings and embedded PEM private keys
+- Quoted long hex/base64 literals and embedded PEM private keys (bare identifiers are not treated as secrets)
 - Use of weak or deprecated hashes (md5, sha1, md4)
 - Weak ciphers or insecure modes (ECB, RC4, DES, 3DES)
 - Use of non-cryptographic RNGs or explicit PRNG seeding (random.random(), random.seed())
@@ -112,6 +112,64 @@ authorization is required. Static cryptographic checks, including nonce
 hypotheses, require access to source files; they are not inferred from HTTP
 response headers.
 
+## Authorized bug-bounty review
+
+Decrypto can prepare review leads for a bug-bounty program you are already
+allowed to test. It does not submit reports, contact program platforms, or
+decide whether you have permission. `--authorized` is your assertion that you
+may test the listed assets. A scope file is the program's asset list as you
+recorded it; it is not proof of permission.
+
+Copy `examples/bounty-scope.local.json` and replace it with the hosts, URLs,
+wildcards, and exclusions from that program. The checked-in example allows
+loopback names only (`127.0.0.1`, `localhost`, `::1`) so it can be practiced
+against a local fixture. Do not add an asset you are not allowed to test.
+Bare hosts match any scheme and port. A URL matches that scheme, host, and
+port; a trailing `/*` covers one path prefix. `*.name.example` matches
+subdomains of any depth and does not match the apex. Exclusions win. `*` and
+other rules that would cover unrelated hosts are rejected.
+
+Run the live auditor only against an in-scope local or authorized asset:
+
+```bash
+python3 decrypto_assumption_scan.py \
+  --scope ./my-program-scope.json \
+  --url http://127.0.0.1:8765/ \
+  --authorized \
+  --delay 0.5 \
+  --out bounty_review
+```
+
+An explicit URL outside the scope is refused before any request is sent.
+Sensitive-path and redirect probes that fall outside the scope are skipped and
+listed as not contacted. Pass `--check-sensitive-paths` only when those paths
+are in scope for the host you are allowed to test. The command writes
+`bounty_review.json`, `bounty_review.md`, and `bounty_review.bounty.md`.
+
+For source that belongs to the same program, point the static scanner at a
+local tree and name the in-scope asset. `code_assets` in the scope file can
+name a local label that is not a URL:
+
+```bash
+python3 decrypto_crypto_checks.py \
+  --scope ./my-program-scope.json \
+  --asset 127.0.0.1 \
+  --out crypto_review \
+  ./path/to/authorized/local/source
+```
+
+`crypto_review.bounty.md` is a submission draft. Each lead has a stable finding
+ID (rule plus asset location, so two sensitive paths on one host do not
+collide), the program asset, the location, taxonomy with CWE when the rule has
+one, redacted evidence, reproduction notes that describe the observation, and
+the assumption about impact. Evidence keeps file locations, statuses, and
+SHA-256 digests. It does not include matched secret literals, response bodies,
+or cookie values. Every lead stays **UNCONFIRMED**. The draft's confirmed
+count is zero. Validate impact yourself, inside the program rules, before
+filing. Do not send the draft to a program whose assets you did not test, and
+do not describe a lead as a confirmed vulnerability unless a separate
+authorized validation actually reproduced the impact.
+
 Live HTTP/OpenAPI checks (assumption-driven)
 
 - HSTS missing on HTTPS endpoints
@@ -181,23 +239,18 @@ Usage examples
 
 CI
 
-The CI workflow compiles Python sources, runs regression tests on Python 3.9,
-3.12 and 3.14, and smoke-tests the CLI. The test runner fails if no tests are
-discovered. Tests use temporary files and a loopback HTTP fixture only; CI does
-not audit external targets. Python 3.9 is a compatibility check, not a deployment
-recommendation; use a supported Python release for normal operation.
+The CI workflow runs the unit tests on Python 3.9 and 3.12. Tests use temporary
+files and a loopback HTTP fixture only; CI does not audit external targets.
+Python 3.9 is a compatibility check, not a deployment recommendation; use a
+supported Python release for normal operation.
 
-The security workflow runs Gitleaks secret scanning and Python CodeQL analysis
-on pushes, pull requests and a weekly schedule. Actions are pinned to commit
-SHAs and tracked by the existing GitHub Actions Dependabot configuration.
-Workflow tokens default to read-only access; only the CodeQL job requests
-security-event write access. Checkouts do not persist credentials, and Gitleaks
-PR comments and artifact uploads are disabled.
-
-There are currently no third-party Python runtime dependencies. The previous
-bare `pip-audit` command audited the runner environment rather than a project
-manifest, so that misleading job has been removed. When adding dependencies,
-commit a versioned dependency manifest and add a manifest-targeted audit gate.
+The security workflow runs Gitleaks, a `pip-audit` check, and Python CodeQL on
+pushes to `main`, pull requests, and a weekly schedule. The workflow requests
+contents read and security-events write. Actions are pinned to major version
+tags and tracked by Dependabot. There are no third-party Python runtime
+dependencies; `pip-audit` in this workflow inspects the runner environment.
+When adding dependencies, commit a versioned dependency manifest and point the
+audit at that manifest.
 
 Repository administrators should require the CI and security checks in branch
 protection before merging. Workflow files alone do not enforce merge protection.
@@ -302,7 +355,7 @@ in the table suppress these particular rules; they are not a general security
 guarantee. Syntax or AST resource errors are reported as partial coverage
 (`regex checks only`) rather than silently counted as complete AST analysis.
 
-- AEAD nonce analysis is source-only: it does not establish runtime key/nonce reuse and may miss aliases, helper functions, or complex control flow.
+- AEAD nonce analysis is source-only: it does not establish runtime key/nonce reuse. Names are resolved per lexical scope; parameters, loop targets, and rebinding are not treated as fixed nonces. A value stays fixed after a branch only when every branch agrees. Attribute receivers such as `self.aead`, helper return values, and star imports from other modules are not resolved.
 - The static crypto checks are intentionally conservative regex-based heuristics, supplemented by a narrow Python AST rule.
   They will produce false positives and require language-aware analysis to
   improve signal-to-noise.

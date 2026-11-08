@@ -67,6 +67,21 @@ class TestCryptoCheckMatching(unittest.TestCase):
         ciphers = [f for f in findings if f["rule"] == "CRYPTO-WEAK-CIPHER"]
         self.assertEqual(len(ciphers), 5)
 
+    def test_hardcoded_secret_requires_a_quoted_literal(self):
+        identifier = "A" * 40
+        literal = "abcdef0123456789abcdef0123456789abcdef99"
+        findings = self.scan(f"{identifier} = 1\nsecret = '{literal}'\n")
+        hard = [f for f in findings if f["rule"] == "CRYPTO-HARDKEY"]
+        self.assertEqual(len(hard), 1)
+        self.assertEqual(hard[0]["evidence"]["line"], 2)
+        self.assertNotIn(literal, str(hard[0]))
+        self.assertNotIn(identifier, str(hard[0]["evidence"]))
+
+    def test_quoted_base64_literal_is_a_lead(self):
+        literal = "AAAA+/AAAA+/AAAA+/AAAA+/AAAA+/AA=="
+        findings = self.scan(f'blob = "{literal}"\n')
+        self.assertTrue(any(f["rule"] == "CRYPTO-HARDKEY" for f in findings))
+
     def test_repeated_matches_have_distinct_location_ids(self):
         findings = self.scan("MD5\nMD5\nMD5 and MD5")
         hashes = [f for f in findings if f["rule"] == "CRYPTO-WEAK-HASH"]
