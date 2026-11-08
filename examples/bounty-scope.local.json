@@ -1,0 +1,13 @@
+{
+  "program": "Synthetic local program — replace with a program you are authorized to test",
+  "in_scope": [
+    "127.0.0.1",
+    "localhost",
+    "::1"
+  ],
+  "out_of_scope": [
+    "http://127.0.0.1/out-of-scope",
+    "http://localhost/out-of-scope"
+  ],
+  "notes": "Practice scope only. These entries allow loopback review and nothing else. Do not point Decrypto at a third-party bounty target unless that program authorizes you."
+}

@@ -24,6 +24,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPHandler, HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from decrypto_bounty import ProgramScope, load_scope, package_bounty, render_bounty_markdown
 from decrypto_taxonomy import classify, summarize
 from decrypto_validation import ORIGINS, evaluate_cors_pair, metadata
 
@@ -91,6 +92,21 @@ def validate_url(url: str) -> str:
     return normalized
 
 
+_ID_EVIDENCE_KEYS = ("path", "tested_parameter", "cookie_index", "scheme", "method")
+
+
+def _finding_material(rule: str, url: str, evidence: dict[str, Any]) -> str:
+    """Keep distinct leads distinct when one rule matches several paths on one URL."""
+    parts = [rule, url]
+    for key in _ID_EVIDENCE_KEYS:
+        value = evidence.get(key)
+        if isinstance(value, bool) or value is None or value == "":
+            continue
+        if isinstance(value, (str, int)):
+            parts.append(f"{key}={value}")
+    return "|".join(parts)
+
+
 def new_finding(rule: str, url: str, title: str, assumption: str,
                 evidence: dict[str, Any], reasoning: str, fix: str, verification: str,
                 priority: str = "review", exploitability: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -103,7 +119,7 @@ def new_finding(rule: str, url: str, title: str, assumption: str,
     stays UNCONFIRMED until the owner validates real-world impact.
     """
     finding = {
-        "id": hashlib.sha256((rule + "|" + url).encode()).hexdigest()[:10].upper(),
+        "id": hashlib.sha256(_finding_material(rule, url, evidence).encode()).hexdigest()[:10].upper(),
         "rule": rule,
         "target": url,
         "title": title,
@@ -492,7 +508,8 @@ def header_variant_checks(url: str, status: int, headers: Message) -> list[dict[
     return findings
 
 
-def open_redirect_checks(opener, state: dict[str, int], delay: float, url: str, timeout: float) -> list[dict[str, Any]]:
+def open_redirect_checks(opener, state: dict[str, int], delay: float, url: str, timeout: float,
+                         allow=None, skipped: list[dict[str, str]] | None = None) -> list[dict[str, Any]]:
     """Probe common redirect-style query parameters for unvalidated reflection.
 
     Appends a harmless, clearly-marked external URL to a redirect-style query
@@ -504,6 +521,13 @@ def open_redirect_checks(opener, state: dict[str, int], delay: float, url: str, 
     findings: list[dict[str, Any]] = []
     for param in REDIRECT_PARAMS:
         test_url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, f"{param}={REDIRECT_MARKER}", ""))
+        if allow is not None and not allow(test_url):
+            if skipped is not None:
+                skipped.append({
+                    "url": urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "/", "", "")),
+                    "reason": f"Redirect probe for parameter {param} is outside the declared program scope and was not sent",
+                })
+            continue
         try:
             status, headers = _throttled_send(opener, state, delay, test_url, "GET", None, timeout)
         except (HTTPError, URLError, TimeoutError, ssl.SSLError, OSError, http.client.HTTPException):
@@ -530,7 +554,8 @@ def open_redirect_checks(opener, state: dict[str, int], delay: float, url: str, 
     return findings
 
 
-def sensitive_path_checks(opener, state: dict[str, int], delay: float, url: str, timeout: float) -> list[dict[str, Any]]:
+def sensitive_path_checks(opener, state: dict[str, int], delay: float, url: str, timeout: float,
+                          allow=None, skipped: list[dict[str, str]] | None = None) -> list[dict[str, Any]]:
     """HEAD-probe a short list of well-known sensitive paths.
 
     Uses HEAD only, so no response body is ever read or stored, preserving the
@@ -541,6 +566,13 @@ def sensitive_path_checks(opener, state: dict[str, int], delay: float, url: str,
     findings: list[dict[str, Any]] = []
     for sub in SENSITIVE_PATHS:
         test_url = urlunsplit((parsed.scheme, parsed.netloc, sub, "", ""))
+        if allow is not None and not allow(test_url):
+            if skipped is not None:
+                skipped.append({
+                    "url": test_url,
+                    "reason": "Sensitive-path probe is outside the declared program scope and was not sent",
+                })
+            continue
         try:
             status, _headers = _throttled_send(opener, state, delay, test_url, "HEAD", None, timeout)
         except (HTTPError, URLError, TimeoutError, ssl.SSLError, OSError, http.client.HTTPException):
@@ -742,7 +774,8 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
          delay: float = 1.0, timeout: float = 6.0, openapi: Path | None = None,
          verify_cors: bool = False, check_redirects: bool = False,
          check_sensitive_paths: bool = False, check_tls: bool = False,
-         max_urls: int = 12) -> dict[str, Any]:
+         max_urls: int = 12, scope: ProgramScope | None = None,
+         skipped_targets: list[dict[str, str]] | None = None) -> dict[str, Any]:
     if len(urls) > max_urls or len(urls) != len(set(urls)):
         raise ValueError(f"Use at most {max_urls} different, explicitly listed URLs per run")
 
@@ -753,6 +786,11 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
         if canonical not in seen:
             seen.add(canonical)
             normalized_urls.append(canonical)
+
+    if scope is not None:
+        rejected = [url for url in normalized_urls if not scope.allows(url)]
+        if rejected:
+            raise ValueError("Out-of-scope targets refused before any request: " + ", ".join(rejected))
 
     if verify_cors and len(normalized_urls) > 8:
         raise ValueError("Paired CORS verification is limited to 8 URLs and 24 total requests")
@@ -770,6 +808,11 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
     errors: list[dict[str, Any]] = []
     sent = 0
     paired_verification: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] | None = None
+    allow = None
+    if scope is not None:
+        skipped = list(skipped_targets or [])
+        allow = scope.allows
 
     for url in normalized_urls:
         pair_samples: list[dict[str, Any]] = []
@@ -802,9 +845,9 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
 
         state = {"sent": sent}
         if check_redirects:
-            findings.extend(open_redirect_checks(opener, state, delay, url, timeout))
+            findings.extend(open_redirect_checks(opener, state, delay, url, timeout, allow=allow, skipped=skipped))
         if check_sensitive_paths:
-            findings.extend(sensitive_path_checks(opener, state, delay, url, timeout))
+            findings.extend(sensitive_path_checks(opener, state, delay, url, timeout, allow=allow, skipped=skipped))
         if check_tls and urlsplit(url).scheme == "https":
             if state["sent"]:
                 time.sleep(delay)
@@ -816,7 +859,7 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
 
     findings.sort(key=lambda f: (f["rule"], f["target"]))
     correlated = correlate_assumptions(findings)
-    return {
+    result = {
         "tool": "Decrypto Assumption-Driven Auditor",
         "version": VERSION,
         "date_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -852,6 +895,15 @@ def scan(urls: list[str], private_urls: set[str], *, cors: bool = False,
         ],
         "privacy": "No response bodies, credentials, cookie names/values, redirect destinations or session tokens were stored.",
     }
+    if scope is not None:
+        result["bounty"] = package_bounty(
+            findings,
+            scope,
+            assets=normalized_urls,
+            skipped=skipped or [],
+            generated_utc=result["date_utc"],
+        )
+    return result
 
 
 def markdown_report(result: dict[str, Any]) -> str:
@@ -971,7 +1023,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--delay", type=float, default=1, help="Seconds between requests (minimum 0.5)")
     parser.add_argument("--timeout", type=float, default=6, help="Request timeout in seconds (1–20)")
     parser.add_argument("--out", type=Path, default=Path("decrypto_findings"), help="Report prefix; generates .json and .md")
+    parser.add_argument("--scope", type=Path, help="Local JSON program scope. Live targets must match before any request; out-of-scope targets are refused.")
     args = parser.parse_args(argv)
+
+    scope = None
+    discovery_skipped: list[dict[str, str]] = []
+    if args.scope:
+        try:
+            scope = load_scope(args.scope)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            parser.error(f"Could not load scope file: {exc}")
+        for raw_url in args.url:
+            try:
+                canonical = validate_url(raw_url)
+            except ValueError as exc:
+                parser.error(str(exc))
+            if not scope.allows(canonical):
+                parser.error("Refusing out-of-scope targets before any request: " + canonical)
 
     urls = list(args.url)
     if args.domain:
@@ -984,8 +1052,21 @@ def main(argv: list[str] | None = None) -> int:
             discovered = discover_authorized_subdomains(args.domain, max_subdomains=args.max_subdomains)
         except (ValueError, RuntimeError) as exc:
             parser.error(f"Subdomain discovery failed: {exc}")
-        urls.extend(u for u in discovered if u not in urls)
+        allowed_discovered = []
+        for found in discovered:
+            if found in urls:
+                continue
+            if scope is not None and not scope.allows(found):
+                discovery_skipped.append({
+                    "url": found,
+                    "reason": "Discovered host is outside the declared program scope and was not contacted",
+                })
+                continue
+            allowed_discovered.append(found)
+        urls.extend(allowed_discovered)
 
+    if scope is not None and not urls and discovery_skipped and not args.openapi:
+        parser.error("No discovered host matched the program scope; nothing was contacted")
     if not urls and not args.openapi:
         parser.error("Provide --url, --domain, or --openapi")
     if urls and not args.authorized:
@@ -1006,7 +1087,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = scan(urls, set(args.private_url), cors=args.cors, delay=args.delay, timeout=args.timeout, openapi=args.openapi,
                       verify_cors=args.verify_cors, check_redirects=args.check_redirects,
-                      check_sensitive_paths=args.check_sensitive_paths, check_tls=args.check_tls, max_urls=max_urls)
+                      check_sensitive_paths=args.check_sensitive_paths, check_tls=args.check_tls, max_urls=max_urls,
+                      scope=scope, skipped_targets=discovery_skipped)
         json_path = args.out.with_suffix(".json")
         md_path = args.out.with_suffix(".md")
         json_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1014,6 +1096,10 @@ def main(argv: list[str] | None = None) -> int:
         md_path.write_text(markdown_report(result), encoding="utf-8")
         print(f"Completed {result['total_requests']} requests; {result['finding_count']} unconfirmed leads, {len(result['errors'])} errors")
         print(f"JSON evidence: {json_path}\nDisclosure draft: {md_path}")
+        if scope is not None:
+            bounty_path = args.out.with_suffix(".bounty.md")
+            bounty_path.write_text(render_bounty_markdown(result), encoding="utf-8")
+            print(f"Bounty draft: {bounty_path}")
         return 0 if not result["errors"] else 2
     except (ValueError, OSError, json.JSONDecodeError) as exc:
         parser.error(str(exc))

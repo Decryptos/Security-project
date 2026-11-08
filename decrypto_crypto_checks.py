@@ -46,8 +46,15 @@ def _make_finding(rule: str, target: str, title: str, evidence: dict[str, Any], 
 # Compile once at import time so each repository scan reuses the same regex objects
 # rather than recompiling them for every file and every rule.
 _PATTERNS = [
-    # Hardcoded-looking long hex or base64 strings (possible keys/secrets)
-    (re.compile(r"(?i)\b([0-9a-f]{32,}|[A-Za-z0-9+/]{32,}={0,2})\b"), "CRYPTO-HARDKEY", "Possible hardcoded key or secret literal"),
+    # Quoted hex (32+) or base64-looking (32+) literals only. Bare identifiers are not secrets.
+    (re.compile(
+        r"(?i)(?<![A-Za-z0-9_])(?:rb|br|r|b|u)?"
+        r"(?:'''([0-9a-f]{32,}|[A-Za-z0-9+/]{32,}={0,2})'''"
+        r"|\"\"\"([0-9a-f]{32,}|[A-Za-z0-9+/]{32,}={0,2})\"\"\""
+        r"|'([0-9a-f]{32,}|[A-Za-z0-9+/]{32,}={0,2})'"
+        r"|\"([0-9a-f]{32,}|[A-Za-z0-9+/]{32,}={0,2})\""
+        r"|`([0-9a-f]{32,}|[A-Za-z0-9+/]{32,}={0,2})`)"
+    ), "CRYPTO-HARDKEY", "Possible hardcoded key or secret literal"),
 
     # PEM private keys in files
     (re.compile(r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----"), "CRYPTO-PEM-IN-CODE", "Private key PEM embedded in repository"),
@@ -185,13 +192,56 @@ def scan_repo_for_crypto_issues(root: Path, languages: list[str] | None = None) 
     return {"findings": findings, "meta": meta, "findings_by_category": summarize(findings)}
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> int:
+    """Scan local source. --scope and --out write an authorized bounty draft."""
     import argparse
-    from pathlib import Path
+    from datetime import datetime, timezone
 
-    p = argparse.ArgumentParser()
-    p.add_argument("root", nargs="?", default=Path.cwd())
-    args = p.parse_args()
-    res = scan_repo_for_crypto_issues(Path(args.root))
-    print(json.dumps(res, indent=2))
+    from decrypto_bounty import load_scope, package_bounty, render_bounty_markdown
+
+    parser = argparse.ArgumentParser(description="Decrypto static crypto review — local source only")
+    parser.add_argument("--scope", type=Path, help="Local JSON program scope. Required with --out.")
+    parser.add_argument("--asset", help="In-scope program asset this source belongs to. Required with --out.")
+    parser.add_argument("--out", type=Path, help="Report prefix; writes .json and .bounty.md")
+    parser.add_argument("root", nargs="?", default=Path.cwd())
+    args = parser.parse_args(argv)
+    bounty_flags = [args.scope is not None, bool(args.asset), args.out is not None]
+    if any(bounty_flags) and not all(bounty_flags):
+        parser.error("--scope, --asset, and --out are used together")
+    scope = None
+    if args.scope is not None:
+        try:
+            scope = load_scope(args.scope)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            parser.error(f"Could not load scope file: {exc}")
+        if args.asset and not scope.allows_asset(args.asset):
+            parser.error("Refusing to report an asset that is outside the declared program scope")
+    try:
+        result = scan_repo_for_crypto_issues(Path(args.root))
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
+    print(json.dumps(result, indent=2))
+    if args.out is not None and scope is not None and args.asset:
+        generated = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        packaged = {
+            "date_utc": generated,
+            "status": "Security leads only — not verified vulnerabilities",
+            "findings": result["findings"],
+            "findings_by_category": result.get("findings_by_category"),
+            "correlated_assumption_hypotheses": [],
+            "bounty": package_bounty(result["findings"], scope, assets=[args.asset], skipped=[], generated_utc=generated),
+        }
+        json_path = args.out.with_suffix(".json")
+        bounty_path = args.out.with_suffix(".bounty.md")
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(json.dumps(packaged, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        bounty_path.write_text(render_bounty_markdown(packaged), encoding="utf-8")
+        print(f"Bounty draft: {bounty_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())
 
