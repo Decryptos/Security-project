@@ -64,7 +64,9 @@ class ScopeEntry:
     path_mode: str
     raw: str
 
-    # Host-only entries intentionally cover both schemes and all ports.\n    # Use URL entries for a precise scheme/port boundary.\n    def matches(self, scheme: str, host: str, port: int | None, path: str) -> bool:
+    # Host-only entries intentionally cover both schemes and all ports.
+    # Use URL entries for a precise scheme/port boundary.
+    def matches(self, scheme: str, host: str, port: int | None, path: str) -> bool:
         if not _host_matches(self.host, host):
             return False
         if self.kind == "host":
