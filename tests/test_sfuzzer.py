@@ -55,7 +55,7 @@ class TestDecryptoSfuzzer(unittest.TestCase):
             "host": "www.example.test",
             "address_families": ["IPv4", "IPv6"],
         }])
-        self.assertNotIn("address", json.dumps(result))
+        self.assertNotIn('"address":', json.dumps(result))
         lookup.assert_called_once_with("www.example.test")
         sleeper.assert_not_called()
 
@@ -105,7 +105,7 @@ class TestDecryptoSfuzzer(unittest.TestCase):
         lookup.assert_not_called()
 
     def test_scope_exclusion_prevents_all_dns_lookups_for_candidate(self):
-        scope = self._wildcard_scope(["https://*.example.test/"])
+        scope = self._wildcard_scope(["*.example.test"])
         lookup = mock.Mock(side_effect=AssertionError("out-of-scope DNS query"))
         result = sfuzzer.enumerate_subdomains(
             "example.test", ["admin"], scope, resolver=lookup,
