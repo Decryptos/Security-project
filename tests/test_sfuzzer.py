@@ -25,6 +25,16 @@ class TestDecryptoSfuzzer(unittest.TestCase):
             "out_of_scope": excludes or [],
         })
 
+    def test_cli_requires_authorization_before_dns(self):
+        with mock.patch.object(sfuzzer, "resolve_dns") as resolver:
+            with self.assertRaises(SystemExit) as caught:
+                sfuzzer.main([
+                    "--domain", "example.test",
+                    "--scope", "unused-scope.json",
+                ])
+        self.assertEqual(caught.exception.code, 2)
+        resolver.assert_not_called()
+
     def test_domain_requires_apex_not_url_or_ip(self):
         self.assertEqual(sfuzzer.normalize_domain("Example.Test."), "example.test")
         for value in ("https://example.test", "127.0.0.1", "example.test/path", "bad..test"):
