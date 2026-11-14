@@ -136,7 +136,13 @@ def _is_name_not_found(error: socket.gaierror) -> bool:
 
 
 def _host_is_in_scope(scope: ProgramScope, hostname: str) -> bool:
-    """Require the candidate host root to be in scope for at least one scheme."""
+    """Require a root-host scope match, and honor host exclusions across schemes."""
+    for excluded in scope.excludes:
+        if any(
+            excluded.matches(scheme, hostname, None, "/")
+            for scheme in ("https", "http")
+        ):
+            return False
     return any(
         scope.allows(f"{scheme}://{hostname}/")
         for scheme in ("https", "http")
