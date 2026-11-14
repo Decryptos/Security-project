@@ -215,7 +215,11 @@ Live HTTP/OpenAPI checks (assumption-driven)
   subdomains (crt.sh certificate-transparency logs + DNS resolution, via
   `decrypto_subdomain_scan.py`) and adds up to `--max-subdomains` (default 5, max 15) to the
   scan. Requires `--authorized`; the discovery step never contacts the subdomains itself.
-- ### Dictionary DNS discovery (sfuzzer-style)
+Private-endpoint assumptions (gated by observable auth signals such as WWW-Authenticate or session-like Set-Cookie)
+- Offline OpenAPI contract inspection (API key-in-URL, mutating operations without documented security requirements)
+
+
+### Dictionary DNS discovery (sfuzzer-style)
 
 `decrypto_sfuzzer.py` implements the wordlist-based DNS subdomain discovery idea behind NITE Team 4's sfuzzer. It discovers names such as `admin.example.com`; it is not an HTTP path fuzzer for `/admin`, `robots.txt`, or `index.php`.
 
@@ -230,9 +234,6 @@ python3 decrypto_sfuzzer.py \
 ```
 
 Each matching hostname is an unconfirmed DNS observation. Review the scope and owner authorization again before using any hostname for HTTP testing. Unit tests mock DNS resolution and contact no external service.
-
-Private-endpoint assumptions (gated by observable auth signals such as WWW-Authenticate or session-like Set-Cookie)
-- Offline OpenAPI contract inspection (API key-in-URL, mutating operations without documented security requirements)
 
 Bug-class taxonomy: every finding carries a `taxonomy` object (category, subtype, CWE,
 OWASP Top 10 2021) from `decrypto_taxonomy.py`, and reports include `findings_by_category`.
